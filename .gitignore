@@ -1,0 +1,5 @@
+.claude/
+.DS_Store
+*.json.bak
+my-data-backup.json
+aoi-backup-*.json
