@@ -425,6 +425,45 @@
   .mstep .btn{ padding:.4rem .65rem; line-height:1; }
   .fchips{ display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; margin:0 0 .8rem; }
 
+  /* bulk selection */
+  .tx-table.sel-on tbody tr[data-edit] td:first-child::before{
+    content:'○'; color:var(--faint); margin-right:.45rem; font-size:.8rem;
+  }
+  .tx-table.sel-on tbody tr.selected td:first-child::before{ content:'●'; color:var(--accent); }
+  .tx-table tbody tr.selected{ background:var(--accent-tint); }
+  #bulkbar{
+    position:fixed; left:50%; transform:translateX(-50%);
+    bottom:calc(1.1rem + env(safe-area-inset-bottom));
+    display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:.45rem;
+    max-width:calc(100% - 1.5rem);
+    padding:.6rem .8rem; border-radius:14px;
+    background:linear-gradient(135deg, oklch(55% 0.012 230 / .14), oklch(25% 0.008 230 / .45));
+    backdrop-filter:blur(20px) saturate(160%); -webkit-backdrop-filter:blur(20px) saturate(160%);
+    border:1px solid oklch(98% 0 0 / .12);
+    box-shadow:0 12px 36px oklch(0% 0 0 / .5), inset 0 1px 0 oklch(100% 0 0 / .12);
+    font-size:.78125rem; z-index:45;
+  }
+  #bulkbar[hidden]{ display:none; }
+  #bulkbar .btn, #bulkbar select{ font-size:.78125rem; padding:.35rem .6rem; }
+  #bb-count{ font-weight:650; margin-right:.25rem; white-space:nowrap; }
+
+  /* chart hover tooltip */
+  .chart-wrap{ position:relative; }
+  .chart-wrap [data-month]:hover{ fill:oklch(100% 0 0 / .05); }
+  .chart-tip{
+    position:absolute; z-index:5; pointer-events:none; min-width:10rem;
+    padding:.55rem .75rem; border-radius:10px;
+    background:oklch(22% 0.008 230 / .96);
+    border:1px solid oklch(98% 0 0 / .12);
+    box-shadow:0 10px 30px oklch(0% 0 0 / .5);
+    font-size:.71875rem; color:var(--muted);
+  }
+  .chart-tip b{ display:block; color:var(--ink); margin-bottom:.35rem; font-size:.75rem; }
+  .chart-tip .row{ display:flex; justify-content:space-between; gap:1.25rem; padding:.08rem 0; }
+  .chart-tip .row span:last-child{ color:var(--ink); }
+  .chart-tip .row.net{ border-top:1px solid var(--line-soft); margin-top:.25rem; padding-top:.3rem; font-weight:600; }
+  .chart-tip i{ display:inline-block; width:.5rem; height:.5rem; border-radius:2px; margin-right:.4rem; vertical-align:-1px; }
+
   /* swipe gesture on transaction rows */
   .tx-table tbody tr{ touch-action:pan-y; }
   .tx-table tbody tr td{ transform:translateX(var(--dx, 0px)); }
@@ -587,13 +626,23 @@
 <div id="backdrop"></div>
 <aside id="panel" aria-label="Transaction editor"></aside>
 <div id="toast" role="status"><span></span><button>Undo</button></div>
+<div id="bulkbar" hidden>
+  <span class="num" id="bb-count">0 selected</span>
+  <button class="btn" data-act="bulk-all">All</button>
+  <button class="btn" data-act="bulk-confirm">✓ Received / Paid</button>
+  <button class="btn" data-act="bulk-pending">Incoming / Due</button>
+  <select id="bb-cat"><option value="">Category…</option></select>
+  <select id="bb-client"><option value="">Client…</option></select>
+  <button class="btn danger" data-act="bulk-delete">Delete</button>
+  <button class="btn" data-act="select-mode">Done</button>
+</div>
 <div id="ptr" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3v7M8 10l-3-3M8 10l3-3"/></svg></div>
 <input type="file" id="importFile" accept="application/json" hidden>
 
 <script>
 'use strict';
 
-const APP_VERSION = '1.0.0 · 2026-06-12';
+const APP_VERSION = '1.1.0 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -784,6 +833,59 @@ function deleteTx(id){
   haptic(16);
   save(); render();
   showToast(`Deleted "${gone.desc}"`, ()=>{ S.tx.splice(Math.min(i,S.tx.length), 0, gone); save(); });
+}
+
+/* ---------- bulk selection ---------- */
+let selectMode = false;
+const selected = new Set();
+
+function updateBulkUI(){
+  const n = selected.size;
+  $('#bb-count').textContent = n + ' selected';
+  ['bulk-confirm','bulk-pending','bulk-delete'].forEach(a=>{
+    const b = document.querySelector(`#bulkbar [data-act="${a}"]`); if(b) b.disabled = !n;
+  });
+  $('#bb-cat').disabled = $('#bb-client').disabled = !n;
+}
+
+function enterSelect(){
+  selectMode = true;
+  selected.clear();
+  $('#bb-cat').innerHTML = '<option value="">Category…</option>' + S.categories.map(c=>`<option>${esc(c)}</option>`).join('');
+  $('#bb-client').innerHTML = '<option value="">Client…</option>' + S.clients.map(c=>`<option>${esc(c)}</option>`).join('');
+  $('#bulkbar').hidden = false;
+  updateBulkUI();
+  render();
+}
+
+function exitSelect(){
+  selectMode = false;
+  selected.clear();
+  $('#bulkbar').hidden = true;
+  render();
+}
+
+function bulkApply(label, fn){
+  const before = S.tx.filter(t=>selected.has(t.id)).map(t=>({...t}));
+  if(!before.length) return;
+  S.tx.forEach(t=>{ if(selected.has(t.id)) fn(t); });
+  haptic(12);
+  save(); exitSelect();
+  showToast(label, ()=>{
+    before.forEach(b=>{ const i = S.tx.findIndex(t=>t.id===b.id); if(i>=0) S.tx[i] = b; });
+    save();
+  });
+}
+
+function bulkDelete(){
+  const gone = S.tx.filter(t=>selected.has(t.id));
+  if(!gone.length) return;
+  S.tx = S.tx.filter(t=>!selected.has(t.id));
+  haptic(16);
+  save(); exitSelect();
+  showToast(`Deleted ${gone.length} transaction${gone.length===1?'':'s'}`, ()=>{
+    S.tx.push(...gone); save();
+  });
 }
 
 /* ---------- privacy mode ---------- */
@@ -1118,7 +1220,7 @@ function viewOverview(){
         <span><i style="background:var(--expense)"></i>Expenses</span>
         <span><i style="background:var(--accent);height:2px;border-radius:0;width:.9rem;vertical-align:2px"></i>Net</span>
       </div>
-      <div class="chart-wrap see" data-see="chart">${chartSVG(months)}</div>
+      <div class="chart-wrap see" data-see="chart">${chartSVG(months)}<div class="chart-tip" hidden></div></div>
     </section>
 
     <section>
@@ -1207,7 +1309,7 @@ function chartSVG(months){
   const netLine = netPts.length>1 ? `<polyline class="net-line" pathLength="1" points="${netPts.map(p=>p.join(',')).join(' ')}" fill="none" stroke-width="1.5" opacity=".85"/>` : '';
   const netDots = netPts.map(p=>`<circle class="net-dot" cx="${p[0]}" cy="${p[1]}" r="2.4"/>`).join('');
   const hits = months.map((m,i)=>
-    `<rect data-month="${m.key}" x="${padL+slot*i}" y="${padT}" width="${slot}" height="${ih+padB}" fill="transparent" style="cursor:pointer"><title>View ${m.full} transactions</title></rect>`).join('');
+    `<rect data-month="${m.key}" data-label="${m.full}" data-rec="${m.received}" data-inc="${m.incoming}" data-exp="${m.expenses}" x="${padL+slot*i}" y="${padT}" width="${slot}" height="${ih+padB}" fill="transparent" style="cursor:pointer"/>`).join('');
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Monthly income and expenses">${g}${bars}${netLine}${netDots}${hits}</svg>`;
 }
 
@@ -1253,7 +1355,7 @@ function viewTx(){
     const action = t.type==='Income' ? (revert ? '↺ Incoming' : '✓ Received')
                                      : (revert ? '↺ Due' : '✓ Paid');
     return head + `
-      <tr data-edit="${t.id}" data-action="${action}"${revert?' data-revert':''} title="Tap to edit">
+      <tr data-edit="${t.id}" data-action="${action}"${revert?' data-revert':''} class="${selected.has(t.id)?'selected':''}" title="${selectMode?'Tap to select':'Tap to edit'}">
         <td style="white-space:nowrap" title="${t.date}">${humanDate(t.date)}</td>
         <td><span class="desc">${esc(t.desc)}</span>${t.recurring?'<span class="rec" title="Recurring">↻</span>':''}${t.notes?`<div class="meta">${esc(t.notes)}</div>`:''}</td>
         <td>${t.client==='N/A'?'<span style="color:var(--faint)">—</span>':esc(t.client)}</td>
@@ -1282,6 +1384,7 @@ function viewTx(){
       <option value="asc" ${F.sort==='asc'?'selected':''}>Oldest first</option>
     </select>
     <span class="grow"></span>
+    <button class="btn" data-act="select-mode">${selectMode?'Done':'Select'}</button>
     <button class="btn primary" data-act="add">Add transaction</button>
   </div>
   ${chips.length ? `<div class="fchips">${chips.map(([k,l])=>`<span class="tag">${esc(l)}<button data-clear="${k}" aria-label="Clear filter">×</button></span>`).join('')}</div>` : ''}
@@ -1292,7 +1395,7 @@ function viewTx(){
     · net <b class="${sumIn-sumOut>=0?'pos':'neg'} amt-b">${php0(sumIn-sumOut)}</b>
   </div>
   <div class="tx-scroll">
-  <table class="tx-table num">
+  <table class="tx-table num ${selectMode?'sel-on':''}">
     <thead><tr>
       <th>Date</th><th>Description</th><th>Client / source</th><th>Category</th>
       <th>Status</th><th class="r">Amount</th><th class="r">PHP</th>
@@ -1545,6 +1648,18 @@ document.addEventListener('click', ev => {
     route = go.dataset.go; render(true); return;
   }
 
+  if(selectMode){
+    const tr = ev.target.closest('tr[data-edit]');
+    if(tr){
+      const id = +tr.dataset.edit;
+      selected.has(id) ? selected.delete(id) : selected.add(id);
+      tr.classList.toggle('selected', selected.has(id));
+      updateBulkUI();
+      haptic(6);
+      return;
+    }
+  }
+
   const flip = ev.target.closest('[data-flip]');
   if(flip){ flipStatus(+flip.dataset.flip); return; }
 
@@ -1597,6 +1712,13 @@ document.addEventListener('click', ev => {
   if(!act) return;
   switch(act){
     case 'sync': syncRates(); break;
+    case 'select-mode': selectMode ? exitSelect() : enterSelect(); break;
+    case 'bulk-all':
+      txFiltered().forEach(t=>selected.add(t.id));
+      updateBulkUI(); render(); break;
+    case 'bulk-confirm': bulkApply(selected.size+' marked received / paid', t=>{ t.status = t.type==='Income'?'Received':'Paid'; }); break;
+    case 'bulk-pending': bulkApply(selected.size+' marked incoming / due', t=>{ t.status = t.type==='Income'?'Incoming':'Due'; }); break;
+    case 'bulk-delete': bulkDelete(); break;
     case 'fr-fresh': adoptState(buildFresh(), 'Fresh start. Add your first transaction!'); break;
     case 'fr-sample': adoptState(buildSample(), 'Sample data loaded. Explore freely!'); break;
     case 'fr-import': $('#importFile').click(); break;
@@ -1665,6 +1787,8 @@ document.addEventListener('input', ev => {
 document.addEventListener('change', ev => {
   const t = ev.target;
   if(t.id==='g-year'){ setYear(t.value); return; }
+  if(t.id==='bb-cat' && t.value){ const v=t.value; bulkApply(selected.size+' → '+v, x=>{ x.category=v; }); return; }
+  if(t.id==='bb-client' && t.value){ const v=t.value; bulkApply(selected.size+' → '+v, x=>{ x.client=v; }); return; }
   if(t.id?.startsWith('f-')){
     const k = t.id.slice(2);
     if(k in F){ F[k] = t.value; render(); }
@@ -1748,7 +1872,7 @@ const easeInQuad = p => p*p;
 
 document.addEventListener('touchstart', ev => {
   const tr = ev.target.closest('.tx-table tbody tr[data-edit]');
-  if(!tr || editing) return;
+  if(!tr || editing || selectMode) return;
   sw = { tr, id:+tr.dataset.edit, x:ev.touches[0].clientX, y:ev.touches[0].clientY,
          dx:0, active:false, committed:false };
 }, {passive:true});
@@ -1867,6 +1991,29 @@ if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js').ca
 setTimeout(()=>{ const sp = $('#splash'); if(sp){ sp.classList.add('done'); setTimeout(()=>sp.remove(), 600); } }, 700);
 window.addEventListener('resize', moveBlob);
 window.addEventListener('load', moveBlob);
+
+/* chart hover readout: follow the cursor across the months */
+document.addEventListener('mousemove', ev => {
+  const hit = ev.target.closest?.('[data-month]');
+  const wrap = ev.target.closest?.('.chart-wrap');
+  document.querySelectorAll('.chart-tip').forEach(t => { if(!hit || t !== wrap?.querySelector('.chart-tip')) t.hidden = true; });
+  if(!hit || !wrap) return;
+  const tip = wrap.querySelector('.chart-tip');
+  if(!tip) return;
+  const rec = +hit.dataset.rec, inc = +hit.dataset.inc, exp = +hit.dataset.exp;
+  tip.innerHTML = `<b>${hit.dataset.label}</b>
+    <div class="row"><span><i style="background:var(--income)"></i>Received</span><span class="num">${php0(rec)}</span></div>
+    ${inc ? `<div class="row"><span><i style="background:var(--pending)"></i>Incoming</span><span class="num">${php0(inc)}</span></div>` : ''}
+    <div class="row"><span><i style="background:var(--expense)"></i>Expenses</span><span class="num">${php0(exp)}</span></div>
+    <div class="row net"><span>Net</span><span class="num ${rec+inc-exp>=0?'pos':'neg'}">${php0(rec+inc-exp)}</span></div>`;
+  tip.hidden = false;
+  const r = wrap.getBoundingClientRect();
+  let x = ev.clientX - r.left + 16, y = ev.clientY - r.top - 12;
+  if(x + tip.offsetWidth > r.width - 6) x = ev.clientX - r.left - tip.offsetWidth - 16;
+  y = Math.max(0, Math.min(y, r.height - tip.offsetHeight - 4));
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
+});
 
 /* hide the floating nav while scrolling down, restore on scroll up */
 let lastY = window.scrollY, scrollPending = false;
