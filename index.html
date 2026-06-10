@@ -642,7 +642,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.1.0 · 2026-06-12';
+const APP_VERSION = '1.2.0 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -705,7 +705,13 @@ try {
   if(raw) S = JSON.parse(raw);
 } catch {}
 if(!S){ S = buildFresh(); firstRun = true; }
-function save(){ try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch{} }
+function persist(){ try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch{} }
+function save(){ S.metaU = Date.now(); persist(); scheduleCloudPush(); }
+
+/* ids: legacy entries are numeric; everything new gets a collision-free string id */
+const sameId = (a,b) => String(a) === String(b);
+function genId(){ return 'tx' + Date.now().toString(36) + Math.floor(Math.random()*1679616).toString(36); }
+function hashId(s){ let h = 5381; for(let i=0;i<s.length;i++) h = ((h<<5)+h+s.charCodeAt(i))>>>0; return 'r'+h.toString(36); }
 
 /* swap in a new dataset (first-run choice or backup restore) and re-derive scope */
 function adoptState(newS, msg){
@@ -818,21 +824,26 @@ function showToast(msg, undoFn){
 
 /* ---------- quick actions ---------- */
 function flipStatus(id){
-  const t = S.tx.find(x=>x.id===id); if(!t) return;
-  const prev = t.status;
+  const t = S.tx.find(x=>sameId(x.id,id)); if(!t) return;
+  const prev = t.status, prevU = t.u;
   t.status = t.type==='Income' ? (t.status==='Received'?'Incoming':'Received')
                                : (t.status==='Paid'?'Due':'Paid');
+  t.u = Date.now();
   haptic(12);
   save(); render();
-  showToast(`${t.desc} → ${t.status}`, ()=>{ t.status = prev; save(); });
+  showToast(`${t.desc} → ${t.status}`, ()=>{ t.status = prev; t.u = prevU; save(); });
 }
 
 function deleteTx(id){
-  const i = S.tx.findIndex(t=>t.id===id); if(i<0) return;
+  const i = S.tx.findIndex(t=>sameId(t.id,id)); if(i<0) return;
   const [gone] = S.tx.splice(i,1);
+  (S.deleted ||= {})[String(gone.id)] = Date.now();
   haptic(16);
   save(); render();
-  showToast(`Deleted "${gone.desc}"`, ()=>{ S.tx.splice(Math.min(i,S.tx.length), 0, gone); save(); });
+  showToast(`Deleted "${gone.desc}"`, ()=>{
+    delete S.deleted[String(gone.id)];
+    S.tx.splice(Math.min(i,S.tx.length), 0, gone); save();
+  });
 }
 
 /* ---------- bulk selection ---------- */
@@ -866,24 +877,27 @@ function exitSelect(){
 }
 
 function bulkApply(label, fn){
-  const before = S.tx.filter(t=>selected.has(t.id)).map(t=>({...t}));
+  const before = S.tx.filter(t=>selected.has(String(t.id))).map(t=>({...t}));
   if(!before.length) return;
-  S.tx.forEach(t=>{ if(selected.has(t.id)) fn(t); });
+  S.tx.forEach(t=>{ if(selected.has(String(t.id))){ fn(t); t.u = Date.now(); } });
   haptic(12);
   save(); exitSelect();
   showToast(label, ()=>{
-    before.forEach(b=>{ const i = S.tx.findIndex(t=>t.id===b.id); if(i>=0) S.tx[i] = b; });
+    before.forEach(b=>{ const i = S.tx.findIndex(t=>sameId(t.id,b.id)); if(i>=0) S.tx[i] = b; });
     save();
   });
 }
 
 function bulkDelete(){
-  const gone = S.tx.filter(t=>selected.has(t.id));
+  const gone = S.tx.filter(t=>selected.has(String(t.id)));
   if(!gone.length) return;
-  S.tx = S.tx.filter(t=>!selected.has(t.id));
+  S.tx = S.tx.filter(t=>!selected.has(String(t.id)));
+  S.deleted ||= {};
+  gone.forEach(t=>{ S.deleted[String(t.id)] = Date.now(); });
   haptic(16);
   save(); exitSelect();
   showToast(`Deleted ${gone.length} transaction${gone.length===1?'':'s'}`, ()=>{
+    gone.forEach(t=>delete S.deleted[String(t.id)]);
     S.tx.push(...gone); save();
   });
 }
@@ -925,15 +939,21 @@ function rollRecurring(){
     if(!cur || t.date > cur.date) latest.set(k, t);
   }
   let changed = false;
+  const existing = new Set(S.tx.map(t=>String(t.id)));
   for(let t of latest.values()){
+    const seriesKey = [t.desc, t.client, t.category, t.currency, t.type].join('|');
     let guard = 0;
     while(t.date.slice(0,7) <= ym && guard++ < 24){
       const [y,m,d] = t.date.split('-').map(Number);
       const ny = m===12 ? y+1 : y, nm = m===12 ? 1 : m+1;
       const maxD = new Date(ny, nm, 0).getDate();
       const nd = `${ny}-${String(nm).padStart(2,'0')}-${String(Math.min(d,maxD)).padStart(2,'0')}`;
-      t = { ...t, id:S.nextId++, date:nd, status: t.type==='Income' ? 'Incoming' : 'Due' };
-      S.tx.push(t); changed = true;
+      // deterministic id so every synced device generates the same occurrence once
+      const rid = hashId(seriesKey + '|' + nd);
+      t = { ...t, id:rid, date:nd, status: t.type==='Income' ? 'Incoming' : 'Due', u:Date.now() };
+      if(!existing.has(rid) && !(S.deleted && S.deleted[rid])){
+        S.tx.push(t); existing.add(rid); changed = true;
+      }
     }
   }
   if(changed) save();
@@ -1053,6 +1073,133 @@ async function syncRates(){
   else syncState = 'error';
   updateSyncUI();
   rerenderIfIdle();
+}
+
+/* ============================== cloud sync ==============================
+   Supabase backend, but the server only ever stores ciphertext:
+   the ledger is sealed with AES-GCM using a key derived from the user's
+   passphrase (PBKDF2) before upload. Merging happens client-side. */
+const SYNC_URL = 'https://nwenewufutasgiyztgft.supabase.co';
+const SYNC_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im53ZW5ld3VmdXRhc2dpeXp0Z2Z0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExMTI3MDQsImV4cCI6MjA5NjY4ODcwNH0.w5iu4OrpngV6PEX-8_sPjpt98DuJ_Xm_Eoza1DSP2kg';
+
+let sess = null;
+try{ sess = JSON.parse(localStorage.getItem('aoi-sync') || 'null'); }catch{}
+let syncStage = 'idle', syncEmail = '', cloudState = 'idle', syncBusy = false, pushTimer = null;
+
+function saveSess(){
+  try{ sess ? localStorage.setItem('aoi-sync', JSON.stringify(sess)) : localStorage.removeItem('aoi-sync'); }catch{}
+}
+
+const b64e = buf => { const a = new Uint8Array(buf); let s = '';
+  for(let i=0; i<a.length; i+=0x8000) s += String.fromCharCode.apply(null, a.subarray(i, i+0x8000));
+  return btoa(s); };
+const b64d = str => Uint8Array.from(atob(str), c => c.charCodeAt(0));
+
+async function deriveKey(pass, salt){
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name:'PBKDF2', salt, iterations:150000, hash:'SHA-256' }, km,
+    { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']);
+}
+async function encState(obj, pass){
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(pass, salt);
+  const ct = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj)));
+  return JSON.stringify({ v:1, s:b64e(salt), i:b64e(iv), c:b64e(ct) });
+}
+async function decState(str, pass){
+  const p = JSON.parse(str);
+  const key = await deriveKey(pass, b64d(p.s));
+  const pt = await crypto.subtle.decrypt({ name:'AES-GCM', iv:b64d(p.i) }, key, b64d(p.c));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+
+async function gotrue(path, body){
+  const r = await fetch(SYNC_URL+'/auth/v1/'+path, {
+    method:'POST', headers:{ 'Content-Type':'application/json', apikey:SYNC_KEY },
+    body: JSON.stringify(body) });
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.msg || j.error_description || j.message || ('auth error '+r.status));
+  return j;
+}
+async function syncSendCode(email){ await gotrue('otp', { email, create_user:true }); }
+async function syncVerify(email, token, pass){
+  const j = await gotrue('verify', { type:'email', email, token });
+  sess = { email, uid:j.user.id, access:j.access_token, refresh:j.refresh_token,
+           exp:(j.expires_at||0)*1000, pass, last:0 };
+  saveSess();
+  await cloudSync(true);
+}
+async function freshToken(){
+  if(!sess) throw new Error('not signed in');
+  if(Date.now() < sess.exp - 60000) return sess.access;
+  const j = await gotrue('token?grant_type=refresh_token', { refresh_token: sess.refresh });
+  sess.access = j.access_token; sess.refresh = j.refresh_token; sess.exp = (j.expires_at||0)*1000;
+  saveSess();
+  return sess.access;
+}
+async function rest(path, opts = {}){
+  const tok = await freshToken();
+  const r = await fetch(SYNC_URL+'/rest/v1/'+path, { ...opts,
+    headers:{ apikey:SYNC_KEY, Authorization:'Bearer '+tok, 'Content-Type':'application/json', ...(opts.headers||{}) } });
+  if(!r.ok) throw new Error('sync http '+r.status);
+  return r.status===204 ? null : r.json();
+}
+
+/* per-transaction merge: newest edit wins by id, deletions win via tombstones,
+   non-transaction sections follow whichever device saved most recently */
+function mergeStates(local, remote){
+  const base = (remote.metaU||0) > (local.metaU||0) ? remote : local;
+  const out = { ...base };
+  const map = new Map();
+  for(const t of [...(local.tx||[]), ...(remote.tx||[])]){
+    const k = String(t.id), cur = map.get(k);
+    if(!cur || (t.u||0) > (cur.u||0)) map.set(k, t);
+  }
+  const tomb = { ...(remote.deleted||{}), ...(local.deleted||{}) };
+  for(const [id, ts] of Object.entries(tomb)){
+    const t = map.get(id);
+    if(t && ts >= (t.u||0)) map.delete(id);
+  }
+  out.tx = [...map.values()];
+  out.deleted = tomb;
+  out.nextId = Math.max(local.nextId||1, remote.nextId||1);
+  return out;
+}
+
+async function cloudSync(force){
+  if(!sess || syncBusy) return;
+  if(!navigator.onLine && !force) return;
+  syncBusy = true; cloudState = 'syncing'; refreshSyncUI();
+  try{
+    const rows = await rest('ledgers?select=data');
+    if(rows && rows[0]){
+      let remote = null;
+      try{ remote = await decState(rows[0].data, sess.pass); }
+      catch{ cloudState = 'badpass'; syncBusy = false; refreshSyncUI(); return; }
+      S = mergeStates(S, remote);
+      persist();
+      rerenderIfIdle();
+    }
+    const cipher = await encState(S, sess.pass);
+    await rest('ledgers', { method:'POST',
+      headers:{ Prefer:'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify([{ user_id: sess.uid, data: cipher, updated_at: new Date().toISOString() }]) });
+    sess.last = Date.now(); saveSess();
+    cloudState = 'ok';
+  }catch(e){ cloudState = 'error'; }
+  syncBusy = false;
+  refreshSyncUI();
+}
+function scheduleCloudPush(){
+  if(!sess) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(()=>cloudSync(), 3000);
+}
+function refreshSyncUI(){
+  const ae = document.activeElement;
+  const typing = ae && (ae.tagName==='INPUT' || ae.tagName==='TEXTAREA' || ae.tagName==='SELECT');
+  if(route==='settings' && !editing && !typing) render();
 }
 
 /* ============================== views ============================== */
@@ -1355,7 +1502,7 @@ function viewTx(){
     const action = t.type==='Income' ? (revert ? '↺ Incoming' : '✓ Received')
                                      : (revert ? '↺ Due' : '✓ Paid');
     return head + `
-      <tr data-edit="${t.id}" data-action="${action}"${revert?' data-revert':''} class="${selected.has(t.id)?'selected':''}" title="${selectMode?'Tap to select':'Tap to edit'}">
+      <tr data-edit="${t.id}" data-action="${action}"${revert?' data-revert':''} class="${selected.has(String(t.id))?'selected':''}" title="${selectMode?'Tap to select':'Tap to edit'}">
         <td style="white-space:nowrap" title="${t.date}">${humanDate(t.date)}</td>
         <td><span class="desc">${esc(t.desc)}</span>${t.recurring?'<span class="rec" title="Recurring">↻</span>':''}${t.notes?`<div class="meta">${esc(t.notes)}</div>`:''}</td>
         <td>${t.client==='N/A'?'<span style="color:var(--faint)">—</span>':esc(t.client)}</td>
@@ -1491,6 +1638,35 @@ function viewSettings(){
     </section>
 
     <section>
+      <h2>Sync across devices</h2>
+      ${sess ? `
+        <p class="sub">Synced as <b>${esc(sess.email)}</b> ·
+          ${cloudState==='syncing' ? 'syncing…'
+          : cloudState==='badpass' ? '<span style="color:var(--expense)">wrong passphrase on this device — sign out and back in with the right one</span>'
+          : cloudState==='error' ? '<span style="color:var(--expense)">sync error · will retry</span>'
+          : 'last sync ' + (sess.last ? ageLabel(sess.last) : 'pending')}</p>
+        <p style="display:flex; gap:.6rem; flex-wrap:wrap">
+          <button class="btn" data-act="sync-now">Sync now</button>
+          <button class="btn" data-act="sync-off">Sign out</button>
+        </p>
+        <p class="sub">End-to-end encrypted: your ledger is sealed with your passphrase before it leaves this device. The server only ever stores ciphertext.</p>`
+      : syncStage==='sent' ? `
+        <p class="sub">Code sent to <b>${esc(syncEmail)}</b>. Enter it with your sync passphrase. Use the <b>same passphrase on every device</b>; it is the key to your data and cannot be recovered.</p>
+        <div class="addrow" style="max-width:24rem; margin-bottom:.5rem"><input id="sy-code" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code"></div>
+        <div class="addrow" style="max-width:24rem; margin-bottom:.5rem"><input id="sy-pass" type="password" placeholder="Sync passphrase (min 6 characters)"></div>
+        <p style="display:flex; gap:.6rem">
+          <button class="btn primary" data-act="sync-verify">Verify & enable</button>
+          <button class="btn" data-act="sync-cancel">Cancel</button>
+        </p>`
+      : `
+        <p class="sub">Keep this ledger identical on your phone and computer. Sign in with an email code; your data is encrypted with a passphrase before it ever leaves the device.</p>
+        <div class="addrow" style="max-width:24rem">
+          <input id="sy-email" type="email" inputmode="email" autocomplete="email" placeholder="you@email.com">
+          <button class="btn" data-act="sync-send">Send code</button>
+        </div>`}
+    </section>
+
+    <section>
       <h2>Clients & sources</h2>
       <div class="tags">${S.clients.map((c,i)=>`<span class="tag">${esc(c)}<button data-del-client="${i}" title="Remove">×</button></span>`).join('')}</div>
       <div class="addrow" style="max-width:24rem"><input id="new-client" placeholder="New client or source"><button class="btn" data-act="add-client">Add</button></div>
@@ -1525,7 +1701,7 @@ function typeDefaults(type){
 }
 
 function openPanel(id){
-  const src = id ? S.tx.find(t=>t.id===id) : null;
+  const src = id ? S.tx.find(t=>sameId(t.id,id)) : null;
   const d = typeDefaults('Income');
   editing = src ? {...src} : {
     id:null, date:todayISO(), type:'Income', status:'Incoming',
@@ -1629,8 +1805,9 @@ function saveTx(){
   if(!e.desc.trim()){ failField($('#e-desc')); return; }
   if(!(e.amount>0)){ failField($('#e-amount')); return; }
   const isNew = e.id===null;
-  if(isNew){ e.id = S.nextId++; S.tx.push(e); }
-  else { const i = S.tx.findIndex(t=>t.id===e.id); if(i>=0) S.tx[i] = e; }
+  e.u = Date.now();
+  if(isNew){ e.id = genId(); S.tx.push(e); }
+  else { const i = S.tx.findIndex(t=>sameId(t.id,e.id)); if(i>=0) S.tx[i] = e; }
   if(e.type==='Income'){ LASTUSE.incomeCat = e.category; LASTUSE.incomeClient = e.client; }
   else LASTUSE.expenseCat = e.category;
   try{ localStorage.setItem('aoi-lastuse', JSON.stringify(LASTUSE)); }catch{}
@@ -1651,7 +1828,7 @@ document.addEventListener('click', ev => {
   if(selectMode){
     const tr = ev.target.closest('tr[data-edit]');
     if(tr){
-      const id = +tr.dataset.edit;
+      const id = tr.dataset.edit;
       selected.has(id) ? selected.delete(id) : selected.add(id);
       tr.classList.toggle('selected', selected.has(id));
       updateBulkUI();
@@ -1661,7 +1838,7 @@ document.addEventListener('click', ev => {
   }
 
   const flip = ev.target.closest('[data-flip]');
-  if(flip){ flipStatus(+flip.dataset.flip); return; }
+  if(flip){ flipStatus(flip.dataset.flip); return; }
 
   const clear = ev.target.closest('[data-clear]');
   if(clear){ F[clear.dataset.clear] = ''; render(); return; }
@@ -1681,7 +1858,7 @@ document.addEventListener('click', ev => {
   }
 
   const editRow = ev.target.closest('[data-edit]');
-  if(editRow){ openPanel(+editRow.dataset.edit); return; }
+  if(editRow){ openPanel(editRow.dataset.edit); return; }
 
   const segBtn = ev.target.closest('#e-type button');
   if(segBtn && editing){
@@ -1714,11 +1891,35 @@ document.addEventListener('click', ev => {
     case 'sync': syncRates(); break;
     case 'select-mode': selectMode ? exitSelect() : enterSelect(); break;
     case 'bulk-all':
-      txFiltered().forEach(t=>selected.add(t.id));
+      txFiltered().forEach(t=>selected.add(String(t.id)));
       updateBulkUI(); render(); break;
     case 'bulk-confirm': bulkApply(selected.size+' marked received / paid', t=>{ t.status = t.type==='Income'?'Received':'Paid'; }); break;
     case 'bulk-pending': bulkApply(selected.size+' marked incoming / due', t=>{ t.status = t.type==='Income'?'Incoming':'Due'; }); break;
     case 'bulk-delete': bulkDelete(); break;
+    case 'sync-send': {
+      const em = $('#sy-email')?.value.trim();
+      if(!em || !em.includes('@')){ failField($('#sy-email')); break; }
+      syncEmail = em;
+      showToast('Sending code…');
+      syncSendCode(em)
+        .then(()=>{ syncStage = 'sent'; render(); showToast('Code sent to ' + em); })
+        .catch(err=>showToast('Could not send: ' + err.message));
+      break; }
+    case 'sync-verify': {
+      const code = $('#sy-code')?.value.trim(), pass = $('#sy-pass')?.value || '';
+      if(!code || code.length < 6){ failField($('#sy-code')); break; }
+      if(pass.length < 6){ failField($('#sy-pass')); break; }
+      showToast('Verifying…');
+      syncVerify(syncEmail, code, pass)
+        .then(()=>{ syncStage = 'idle'; render(); showToast('Sync enabled on this device'); })
+        .catch(err=>showToast('Verify failed: ' + err.message));
+      break; }
+    case 'sync-cancel': syncStage = 'idle'; render(); break;
+    case 'sync-now': cloudSync(true); break;
+    case 'sync-off':
+      if(confirm('Stop syncing on this device? Your local data stays.')){
+        sess = null; saveSess(); cloudState = 'idle'; render();
+      } break;
     case 'fr-fresh': adoptState(buildFresh(), 'Fresh start. Add your first transaction!'); break;
     case 'fr-sample': adoptState(buildSample(), 'Sample data loaded. Explore freely!'); break;
     case 'fr-import': $('#importFile').click(); break;
@@ -1873,7 +2074,7 @@ const easeInQuad = p => p*p;
 document.addEventListener('touchstart', ev => {
   const tr = ev.target.closest('.tx-table tbody tr[data-edit]');
   if(!tr || editing || selectMode) return;
-  sw = { tr, id:+tr.dataset.edit, x:ev.touches[0].clientX, y:ev.touches[0].clientY,
+  sw = { tr, id:tr.dataset.edit, x:ev.touches[0].clientX, y:ev.touches[0].clientY,
          dx:0, active:false, committed:false };
 }, {passive:true});
 
@@ -1986,7 +2187,9 @@ render();
 applyPrivacy();
 updateSyncUI();
 syncRates();
+cloudSync();
 setInterval(syncRates, 30*60*1000);
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') cloudSync(); });
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js').catch(()=>{}); }
 setTimeout(()=>{ const sp = $('#splash'); if(sp){ sp.classList.add('done'); setTimeout(()=>sp.remove(), 600); } }, 700);
 window.addEventListener('resize', moveBlob);

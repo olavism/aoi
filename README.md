@@ -20,6 +20,7 @@ It is deliberately **not** a fintech product. There are no accounts, no sign-ups
 - **Year scope** — view any year or all time; the app grows with you indefinitely
 - **Privacy blur** — one tap hides every amount from shoulder surfers
 - **Offline-first PWA** — installs to the home screen, works with no connection, syncs rates when back online
+- **Cross-device sync (optional)** — sign in with an email code and your ledger stays identical on phone and computer; end-to-end encrypted with a passphrase, so the sync server only ever stores ciphertext
 - **Backup & restore** — export your entire ledger as JSON, restore it on any device
 
 ## Install (iPhone)
@@ -33,6 +34,8 @@ Works the same on Android (Chrome → Install app) and desktop browsers.
 ## Privacy
 
 All data is stored in your browser's local storage on your own device. Nothing is transmitted anywhere except two anonymous, read-only rate lookups (exchange rates and crypto prices). Deleting the app deletes the data, so export a backup now and then — the app reminds you.
+
+If you opt into sync, your ledger is encrypted on-device (AES-GCM, key derived from your passphrase via PBKDF2) before upload; the backend stores only ciphertext it cannot read, protected by row-level security. The passphrase never leaves your devices — and that means it's unrecoverable if forgotten, so don't forget it.
 
 ## Tech
 
