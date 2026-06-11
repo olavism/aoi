@@ -103,6 +103,7 @@
       var(--bg);
   }
   #firstrun[hidden]{ display:none; }
+  .fr-inner[hidden]{ display:none; }
   .fr-inner{ display:flex; flex-direction:column; align-items:center; gap:.7rem;
              width:min(19rem,100%); text-align:center; animation:rise .4s cubic-bezier(.16,1,.3,1); }
   .fr-inner .s-mark{ margin-bottom:.3rem; }
@@ -667,12 +668,25 @@
 
 <div id="splash" aria-hidden="true"><div class="s-mark">aoi<i></i></div></div>
 <div id="firstrun" hidden>
-  <div class="fr-inner">
+  <div class="fr-inner" id="fr-choice">
     <div class="s-mark">aoi<i></i></div>
     <p class="fr-tag">A private, multi-currency cashflow ledger.<br>Everything stays on this device.</p>
     <button class="btn primary fr-btn" data-act="fr-fresh">Start fresh</button>
     <button class="btn fr-btn" data-act="fr-sample">Explore with sample data</button>
     <button class="btn fr-btn" data-act="fr-import">Restore a backup</button>
+  </div>
+  <div class="fr-inner" id="fr-clients" hidden>
+    <div class="s-mark" style="font-size:1.6rem">aoi<i style="width:.34rem;height:.34rem"></i></div>
+    <p class="fr-tag" style="margin-bottom:.4rem"><b style="color:var(--ink)">Who pays you?</b><br>
+      Add your clients or income sources first, so logging income is one tap later.</p>
+    <div class="addrow" style="width:100%">
+      <input id="frc-input" type="text" placeholder="e.g. Acme Studio" autocomplete="off">
+      <button class="btn" data-act="fr-cl-add">Add</button>
+    </div>
+    <div class="tags" id="frc-list" style="justify-content:center; min-height:1.8rem; margin:.2rem 0 .4rem"></div>
+    <button class="btn primary fr-btn" data-act="fr-cl-done">Continue</button>
+    <button class="btn fr-btn" data-act="fr-cl-skip">Skip for now</button>
+    <p class="fr-tag" style="font-size:.71875rem; margin:0.4rem 0 0">You can always add more later in Settings → Clients &amp; sources.</p>
   </div>
 </div>
 <header class="top">
@@ -710,7 +724,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.5.0 · 2026-06-12';
+const APP_VERSION = '1.5.1 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -899,6 +913,21 @@ function seriesOf(t){
   const k = [t.desc, t.client, t.category, t.currency, t.type].join('|');
   return S.tx.filter(x=>x.recurring && [x.desc, x.client, x.category, x.currency, x.type].join('|')===k);
 }
+/* first-run client onboarding */
+const frClients = [];
+function frClientAdd(){
+  const inp = $('#frc-input'); if(!inp) return;
+  const v = inp.value.trim();
+  if(v && !frClients.some(c=>c.toLowerCase()===v.toLowerCase()) && v.toLowerCase()!=='n/a'){
+    frClients.push(v);
+    haptic(6);
+  }
+  inp.value = '';
+  inp.focus();
+  $('#frc-list').innerHTML = frClients.map((c,i)=>
+    `<span class="tag">${esc(c)}<button data-frc-del="${i}" aria-label="Remove ${esc(c)}">×</button></span>`).join('');
+}
+
 let scopeResolve = null;
 function askScope(title){
   return new Promise(res=>{
@@ -2145,6 +2174,14 @@ document.addEventListener('click', ev => {
 
   const delRate = ev.target.closest('[data-del-rate]');
   if(delRate){ delete S.rates[delRate.dataset.delRate]; save(); render(); return; }
+  const frcDel = ev.target.closest('[data-frc-del]');
+  if(frcDel){
+    frClients.splice(+frcDel.dataset.frcDel, 1);
+    $('#frc-list').innerHTML = frClients.map((c,i)=>
+      `<span class="tag">${esc(c)}<button data-frc-del="${i}" aria-label="Remove ${esc(c)}">×</button></span>`).join('');
+    return;
+  }
+
   const delClient = ev.target.closest('[data-del-client]');
   if(delClient){ S.clients.splice(+delClient.dataset.delClient,1); save(); render(); return; }
   const delCat = ev.target.closest('[data-del-cat]');
@@ -2175,7 +2212,23 @@ document.addEventListener('click', ev => {
       if(confirm('Stop syncing on this device? Your local data stays.')){
         sess = null; saveSess(); cloudState = 'idle'; render();
       } break;
-    case 'fr-fresh': adoptState(buildFresh(), 'Fresh start. Add your first transaction!'); break;
+    case 'fr-fresh':
+      $('#fr-choice').hidden = true;
+      $('#fr-clients').hidden = false;
+      setTimeout(()=> $('#frc-input')?.focus(), 150);
+      break;
+    case 'fr-cl-add': frClientAdd(); break;
+    case 'fr-cl-done': {
+      frClientAdd(); // capture anything still typed in the box
+      const s = buildFresh();
+      if(frClients.length) s.clients = [...frClients, 'N/A'];
+      adoptState(s, frClients.length
+        ? `Fresh start · ${frClients.length} client${frClients.length===1?'':'s'} ready`
+        : 'Fresh start. Add your first transaction!');
+      break; }
+    case 'fr-cl-skip':
+      adoptState(buildFresh(), 'Fresh start. Add your first transaction!');
+      break;
     case 'fr-sample': adoptState(buildSample(), 'Sample data loaded. Explore freely!'); break;
     case 'fr-import': $('#importFile').click(); break;
     case 'add': openPanel(null); break;
@@ -2276,6 +2329,7 @@ function refreshTxOnly(){
 }
 
 document.addEventListener('keydown', ev => {
+  if(ev.key==='Enter' && ev.target.id==='frc-input'){ ev.preventDefault(); frClientAdd(); return; }
   if(ev.key==='Escape' && editing){
     const ac = $('#ac');
     if(ac && !ac.hidden){ ac.hidden = true; return; }

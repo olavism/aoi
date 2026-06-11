@@ -1,6 +1,6 @@
 'use strict';
 // aoi service worker: app shell cached for offline, rate APIs always network.
-const CACHE = 'aoi-v10';
+const CACHE = 'aoi-v11';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
