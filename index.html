@@ -742,7 +742,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.7.0 · 2026-06-12';
+const APP_VERSION = '1.7.1 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -1354,7 +1354,16 @@ function mergeStates(local, remote){
   out.clients = [...new Set([...(base.clients||[]), ...(other.clients||[])])];
   out.categories = [...new Set([...(base.categories||[]), ...(other.categories||[])])];
   out.rates = { ...(other.rates||{}), ...(base.rates||{}) };
-  // assets & savings: id-keyed, newest edit wins, deletions stick via tombstones
+  // assets & savings: id-keyed, newest edit wins, deletions stick via tombstones.
+  // Normalize BOTH sides first: data from older app versions has no ids, and
+  // an id-less remote USDT must collapse into the local id-bearing USDT,
+  // not sit beside it as a duplicate.
+  const normalizeItems = st => {
+    (st.assets||[]).forEach(a=>{ if(!a.id) a.id = 'as_' + hashId(String(a.name).trim().toUpperCase()); });
+    (st.savings||[]).forEach(s=>{ if(!s.id) s.id = 'sv_' + hashId(String(s.name||'').trim().toLowerCase() + '|' + (s.currency||'')); });
+  };
+  normalizeItems(local);
+  normalizeItems(remote);
   const mergeItems = (a=[], b=[], tomb={}) => {
     const m = new Map();
     for(const it of [...a, ...b]){
