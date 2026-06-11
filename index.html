@@ -642,7 +642,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.2.1 · 2026-06-12';
+const APP_VERSION = '1.2.2 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -1069,7 +1069,9 @@ async function syncRates(){
       if(id && phpOf(id)){ a.rate = +phpOf(id).toFixed(2); updated = true; }
     }
   }
-  if(updated){ S.lastSync = Date.now(); save(); syncState = 'ok'; }
+  // persist() not save(): a live-rate refresh is not a user edit and must not
+  // claim merge priority for this device's sections, nor trigger a cloud push
+  if(updated){ S.lastSync = Date.now(); persist(); syncState = 'ok'; }
   else syncState = 'error';
   updateSyncUI();
   rerenderIfIdle();
@@ -1174,8 +1176,16 @@ async function rest(path, opts = {}){
 /* per-transaction merge: newest edit wins by id, deletions win via tombstones,
    non-transaction sections follow whichever device saved most recently */
 function mergeStates(local, remote){
-  const base = (remote.metaU||0) > (local.metaU||0) ? remote : local;
+  const newerIsRemote = (remote.metaU||0) > (local.metaU||0);
+  const base = newerIsRemote ? remote : local;
+  const other = newerIsRemote ? local : remote;
   const out = { ...base };
+  // union the list sections so a fresh device's defaults can never erase real data
+  out.clients = [...new Set([...(base.clients||[]), ...(other.clients||[])])];
+  out.categories = [...new Set([...(base.categories||[]), ...(other.categories||[])])];
+  const assetNames = new Set((base.assets||[]).map(a=>String(a.name).toUpperCase()));
+  out.assets = [...(base.assets||[]), ...(other.assets||[]).filter(a=>!assetNames.has(String(a.name).toUpperCase()))];
+  out.rates = { ...(other.rates||{}), ...(base.rates||{}) };
   const map = new Map();
   for(const t of [...(local.tx||[]), ...(remote.tx||[])]){
     const k = String(t.id), cur = map.get(k);
