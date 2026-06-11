@@ -33,7 +33,9 @@ Works the same on Android (Chrome → Install app) and desktop browsers.
 
 ## Privacy
 
-All data is stored in your browser's local storage on your own device. Nothing is transmitted anywhere except two anonymous, read-only rate lookups (exchange rates and crypto prices). Deleting the app deletes the data, so export a backup now and then — the app reminds you.
+All data is stored in your browser's local storage on your own device. Your financial data is never transmitted anywhere except two anonymous, read-only rate lookups (exchange rates and crypto prices). Deleting the app deletes the data, so export a backup now and then — the app reminds you.
+
+The app sends one anonymous visit ping when opened (at most hourly): a timestamp plus two booleans (first visit or returning, installed or in-browser). No IP addresses, identifiers, or usage details are stored, and the counter is write-only to the public — it exists solely so the author knows roughly how many people use the app.
 
 If you opt into sync, your ledger is encrypted on-device (AES-GCM, key derived from your passphrase via PBKDF2) before upload; the backend stores only ciphertext it cannot read, protected by row-level security. The passphrase never leaves your devices — and that means it's unrecoverable if forgotten, so don't forget it.
 

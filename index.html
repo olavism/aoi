@@ -724,7 +724,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.5.1 · 2026-06-12';
+const APP_VERSION = '1.5.2 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -2533,6 +2533,26 @@ setTimeout(()=>{ const sp = $('#splash'); if(sp){ sp.classList.add('done'); setT
       ()=>{ route = 'settings'; }, 'Open settings'), 2600);
   }
 }
+/* anonymous visit ping: a timestamp and two booleans, nothing else —
+   no IP stored, no identifiers, write-only to the public (see README) */
+{
+  const h = location.hostname;
+  const local = h==='localhost' || h==='127.0.0.1' || /^192\.168\./.test(h);
+  let lastPing = 0; try{ lastPing = +localStorage.getItem('aoi-lastping') || 0; }catch{}
+  if(!local && Date.now()-lastPing > 3600e3 && navigator.onLine){
+    let first = false;
+    try{
+      first = !localStorage.getItem('aoi-visited');
+      localStorage.setItem('aoi-visited', '1');
+      localStorage.setItem('aoi-lastping', String(Date.now()));
+    }catch{}
+    fetch(SYNC_URL+'/rest/v1/visits', { method:'POST',
+      headers:{ apikey:SYNC_KEY, 'Content-Type':'application/json', Prefer:'return=minimal' },
+      body: JSON.stringify({ first, standalone: matchMedia('(display-mode: standalone)').matches })
+    }).catch(()=>{});
+  }
+}
+
 window.addEventListener('resize', moveBlob);
 window.addEventListener('load', moveBlob);
 
