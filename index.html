@@ -59,16 +59,11 @@
   main.anim{ animation:rise .28s cubic-bezier(.16,1,.3,1); }
   @keyframes pulse{ 0%,100%{ opacity:1; } 50%{ opacity:.35; } }
 
-  /* graph entrance: bars grow in when first seen */
-  .chart-wrap svg :is(.bar-in,.bar-pn,.bar-ex){
-    transform-box:fill-box; transform-origin:center bottom;
-    transition:transform .7s cubic-bezier(.22,1,.36,1);
-  }
-  .chart-wrap.see:not(.go) svg :is(.bar-in,.bar-pn,.bar-ex){ transform:scaleY(.001); }
-  .chart-wrap svg .net-line{ stroke-dasharray:1; transition:stroke-dashoffset .9s ease-out .5s; }
-  .chart-wrap.see:not(.go) svg .net-line{ stroke-dashoffset:1; }
-  .chart-wrap svg .net-dot{ transition:opacity .45s ease-out 1.15s; }
-  .chart-wrap.see:not(.go) svg .net-dot{ opacity:0; }
+  /* graph entrance: lines draw themselves in, glow and area fade up after */
+  .chart-wrap svg .ln{ stroke-dasharray:1; transition:stroke-dashoffset 1.1s cubic-bezier(.4,0,.2,1) .1s; }
+  .chart-wrap.see:not(.go) svg .ln{ stroke-dashoffset:1; }
+  .chart-wrap svg :is(.ar,.lnglow){ transition:opacity .9s ease-out .7s; }
+  .chart-wrap.see:not(.go) svg :is(.ar,.lnglow){ opacity:0; }
   .hbars .fill{ transition:width .85s cubic-bezier(.22,1,.36,1); }
   .hbars.see:not(.go) .fill{ width:0 !important; }
 
@@ -680,7 +675,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.3.0 · 2026-06-12';
+const APP_VERSION = '1.4.0 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -1433,12 +1428,11 @@ function viewOverview(){
 
   <div class="ov-grid">
     <section class="wide">
-      <h2>${YEAR==='all' ? 'Yearly cashflow · all time' : 'Monthly cashflow · '+YEAR}</h2>
+      <h2>Cashflow · ${YEAR==='all' ? 'all time' : YEAR}</h2>
       <div class="legend">
-        <span><i style="background:var(--income)"></i>Received</span>
-        <span><i style="background:var(--pending)"></i>Incoming</span>
-        <span><i style="background:var(--expense)"></i>Expenses</span>
-        <span><i style="background:var(--accent);height:2px;border-radius:0;width:.9rem;vertical-align:2px"></i>Net</span>
+        <span><i style="background:var(--income);box-shadow:0 0 6px var(--income-glow)"></i>Income</span>
+        <span><i style="background:var(--expense);box-shadow:0 0 6px var(--expense-glow)"></i>Expenses</span>
+        <span style="color:var(--faint)">trailing 30 days</span>
       </div>
       <div class="chart-wrap see" data-see="chart">${chartSVG(months)}<div class="chart-tip" hidden></div></div>
     </section>
@@ -1498,39 +1492,112 @@ function hbars(entries, color){
     </div>`).join('');
 }
 
+/* Catmull-Rom → cubic bezier: smooth curve through every point */
+function smoothPath(pts){
+  if(pts.length === 1) return `M${pts[0][0]} ${pts[0][1]}`;
+  let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+  for(let i=0; i<pts.length-1; i++){
+    const p0 = pts[Math.max(0,i-1)], p1 = pts[i], p2 = pts[i+1], p3 = pts[Math.min(pts.length-1,i+2)];
+    const c1x = p1[0]+(p2[0]-p0[0])/6, c1y = p1[1]+(p2[1]-p0[1])/6;
+    const c2x = p2[0]-(p3[0]-p1[0])/6, c2y = p2[1]-(p3[1]-p1[1])/6;
+    d += ` C${c1x.toFixed(1)} ${c1y.toFixed(1)} ${c2x.toFixed(1)} ${c2y.toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
+
 function chartSVG(months){
-  const W=960, H=270, padL=56, padR=8, padT=12, padB=26;
+  const W=960, H=270, padL=56, padR=8, padT=16, padB=26;
   const iw = W-padL-padR, ih = H-padT-padB;
-  const maxRaw = Math.max(1, ...months.map(m=>Math.max(m.received+m.incoming, m.expenses)));
+  const baseY = padT + ih;
+
+  // daily-resolution series: trailing 30-day totals, so every single
+  // transaction nudges the curve the day it lands and decays out 30 days later
+  const DAY = 864e5;
+  const txs = S.tx.filter(inYear);
+  let d0, d1;
+  if(YEAR==='all'){
+    const ds = txs.map(t=>t.date).sort();
+    d0 = new Date(ds[0]+'T00:00:00'); d1 = new Date(ds[ds.length-1]+'T00:00:00');
+  } else {
+    d0 = new Date(YEAR+'-01-01T00:00:00'); d1 = new Date(YEAR+'-12-31T00:00:00');
+  }
+  const span = Math.max(2, Math.round((d1-d0)/DAY)+1);
+  const dayIdx = iso => Math.round((new Date(iso+'T00:00:00')-d0)/DAY);
+  const incD = new Float64Array(span), expD = new Float64Array(span);
+  for(const t of txs){
+    const i = dayIdx(t.date);
+    if(i<0 || i>=span) continue;
+    if(t.type==='Income') incD[i] += pesos(t); else expD[i] += pesos(t);
+  }
+  const WIN = 30;
+  const roll = arr => { const out = new Float64Array(span); let s = 0;
+    for(let i=0;i<span;i++){ s += arr[i]; if(i>=WIN) s -= arr[i-WIN]; out[i] = s; } return out; };
+  const rInc = roll(incD), rExp = roll(expD);
+  const stepN = Math.max(1, Math.ceil(span/420));
+  const idxs = []; for(let i=0;i<span;i+=stepN) idxs.push(i);
+  if(idxs[idxs.length-1] !== span-1) idxs.push(span-1);
+
+  const maxRaw = Math.max(1, ...idxs.map(i=>Math.max(rInc[i], rExp[i])));
   const step = maxRaw>200000 ? 50000 : 25000;
   const max = Math.ceil(maxRaw/step)*step;
   const y = v => padT + ih - (v/max)*ih;
-  const n = months.length || 1;
-  const slot = iw/n, bw = Math.min(22, slot*0.28), gap = 4;
+  const X = i => padL + (i/(span-1))*iw;
 
   let g = '';
   for(let v=0; v<=max; v+=step){
     g += `<line x1="${padL}" y1="${y(v)}" x2="${W-padR}" y2="${y(v)}" stroke="var(--line-soft)" stroke-width="1"/>` +
          `<text x="${padL-8}" y="${y(v)+3.5}" text-anchor="end" font-size="10" fill="var(--faint)">${v? (v/1000)+'k' : '0'}</text>`;
   }
-  let bars='', netPts=[];
-  months.forEach((m,i)=>{
-    const cx = padL + slot*i + slot/2;
-    const xi = cx - bw - gap/2, xe = cx + gap/2;
-    const recH = ih*(m.received/max), incH = ih*(m.incoming/max);
-    bars += `<g><title>${m.full} — received ${php0(m.received)}${m.incoming?', incoming '+php0(m.incoming):''}, expenses ${php0(m.expenses)}</title>`;
-    const dly = `style="transition-delay:${i*45}ms"`;
-    if(m.received) bars += `<rect class="bar-in" ${dly} x="${xi}" y="${y(m.received)}" width="${bw}" height="${Math.max(1,recH)}" rx="1.5"/>`;
-    if(m.incoming) bars += `<rect class="bar-pn" ${dly} x="${xi}" y="${y(m.received+m.incoming)}" width="${bw}" height="${Math.max(1,incH)}" rx="1.5"/>`;
-    if(m.expenses) bars += `<rect class="bar-ex" ${dly} x="${xe}" y="${y(m.expenses)}" width="${bw}" height="${Math.max(1, ih*(m.expenses/max))}" rx="1.5"/>`;
-    bars += `</g><text x="${cx}" y="${H-8}" text-anchor="middle" font-size="10" fill="var(--muted)">${m.axis}</text>`;
-    netPts.push([cx, y(Math.max(0, m.received+m.incoming-m.expenses))]);
+
+  const incPts = idxs.map(i=>[X(i), y(rInc[i])]);
+  const expPts = idxs.map(i=>[X(i), y(rExp[i])]);
+
+  // month labels centered on each period's span of days
+  const periodStart = m => YEAR==='all' ? m.key+'-01-01' : m.key+'-01';
+  const periodEnd = m => {
+    if(YEAR==='all') return (+m.key+1)+'-01-01';
+    const [yy,mm] = m.key.split('-').map(Number);
+    return `${mm===12?yy+1:yy}-${String(mm===12?1:mm+1).padStart(2,'0')}-01`;
+  };
+  let labels = '';
+  months.forEach(m=>{
+    const a = Math.max(0, dayIdx(periodStart(m))), b = Math.min(span-1, dayIdx(periodEnd(m))-1);
+    if(b<=a) return;
+    labels += `<text x="${(X(a)+X(b))/2}" y="${H-8}" text-anchor="middle" font-size="10" fill="var(--muted)">${m.axis}</text>`;
   });
-  const netLine = netPts.length>1 ? `<polyline class="net-line" pathLength="1" points="${netPts.map(p=>p.join(',')).join(' ')}" fill="none" stroke-width="1.5" opacity=".85"/>` : '';
-  const netDots = netPts.map(p=>`<circle class="net-dot" cx="${p[0]}" cy="${p[1]}" r="2.4"/>`).join('');
-  const hits = months.map((m,i)=>
-    `<rect data-month="${m.key}" data-label="${m.full}" data-rec="${m.received}" data-inc="${m.incoming}" data-exp="${m.expenses}" x="${padL+slot*i}" y="${padT}" width="${slot}" height="${ih+padB}" fill="transparent" style="cursor:pointer"/>`).join('');
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Monthly income and expenses">${g}${bars}${netLine}${netDots}${hits}</svg>`;
+
+  const incLine = smoothPath(incPts);
+  const expLine = smoothPath(expPts);
+  const incArea = incPts.length>1
+    ? `${incLine} L${incPts[incPts.length-1][0].toFixed(1)} ${baseY} L${incPts[0][0].toFixed(1)} ${baseY} Z` : '';
+
+  const defs = `<defs>
+    <pattern id="dotgrid" width="7" height="7" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.1" fill="var(--income)" opacity=".45"/>
+    </pattern>
+    <filter id="bloom" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <clipPath id="plot"><rect x="${padL}" y="0" width="${iw}" height="${baseY}"/></clipPath>
+  </defs>`;
+
+  const series = `
+    <g clip-path="url(#plot)">
+      ${incArea ? `<path class="ar" d="${incArea}" fill="url(#dotgrid)" stroke="none"/>` : ''}
+      ${expPts.length>1 ? `<path class="lnglow" d="${expLine}" fill="none" stroke="var(--expense)" stroke-width="9" opacity=".3" filter="url(#bloom)"/>` : ''}
+      ${incPts.length>1 ? `<path class="lnglow" d="${incLine}" fill="none" stroke="var(--income)" stroke-width="10" opacity=".4" filter="url(#bloom)"/>` : ''}
+      ${expPts.length>1 ? `<path class="ln" pathLength="1" d="${expLine}" fill="none" stroke="var(--expense)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity=".85"/>` : ''}
+      ${incPts.length>1 ? `<path class="ln" pathLength="1" d="${incLine}" fill="none" stroke="var(--income)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>` : ''}
+      ${incPts.length===1 ? `<circle cx="${incPts[0][0]}" cy="${incPts[0][1]}" r="4" fill="var(--income)"/>` : ''}
+    </g>`;
+
+  const hits = months.map(m=>{
+    const a = Math.max(0, dayIdx(periodStart(m))), b = Math.min(span-1, dayIdx(periodEnd(m))-1);
+    if(b<=a) return '';
+    return `<rect data-month="${m.key}" data-label="${m.full}" data-rec="${m.received}" data-inc="${m.incoming}" data-exp="${m.expenses}" x="${X(a).toFixed(1)}" y="${padT}" width="${(X(b)-X(a)).toFixed(1)}" height="${ih+padB}" fill="transparent" style="cursor:pointer"/>`;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cashflow, trailing 30-day totals">${defs}${g}${series}${labels}${hits}</svg>`;
 }
 
 /* ---------- transactions ---------- */
