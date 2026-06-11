@@ -675,7 +675,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.4.0 · 2026-06-12';
+const APP_VERSION = '1.4.1 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -1432,7 +1432,7 @@ function viewOverview(){
       <div class="legend">
         <span><i style="background:var(--income);box-shadow:0 0 6px var(--income-glow)"></i>Income</span>
         <span><i style="background:var(--expense);box-shadow:0 0 6px var(--expense-glow)"></i>Expenses</span>
-        <span style="color:var(--faint)">trailing 30 days</span>
+        <span style="color:var(--faint)">month to date</span>
       </div>
       <div class="chart-wrap see" data-see="chart">${chartSVG(months)}<div class="chart-tip" hidden></div></div>
     </section>
@@ -1498,8 +1498,12 @@ function smoothPath(pts){
   let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
   for(let i=0; i<pts.length-1; i++){
     const p0 = pts[Math.max(0,i-1)], p1 = pts[i], p2 = pts[i+1], p3 = pts[Math.min(pts.length-1,i+2)];
-    const c1x = p1[0]+(p2[0]-p0[0])/6, c1y = p1[1]+(p2[1]-p0[1])/6;
-    const c2x = p2[0]-(p3[0]-p1[0])/6, c2y = p2[1]-(p3[1]-p1[1])/6;
+    const c1x = p1[0]+(p2[0]-p0[0])/6, c2x = p2[0]-(p3[0]-p1[0])/6;
+    // clamp control-point y within the segment's endpoints so the curve
+    // never overshoots a real value (peaks stay exactly on the data)
+    const lo = Math.min(p1[1], p2[1]), hi = Math.max(p1[1], p2[1]);
+    const c1y = Math.min(hi, Math.max(lo, p1[1]+(p2[1]-p0[1])/6));
+    const c2y = Math.min(hi, Math.max(lo, p2[1]-(p3[1]-p1[1])/6));
     d += ` C${c1x.toFixed(1)} ${c1y.toFixed(1)} ${c2x.toFixed(1)} ${c2y.toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
   }
   return d;
@@ -1529,10 +1533,18 @@ function chartSVG(months){
     if(i<0 || i>=span) continue;
     if(t.type==='Income') incD[i] += pesos(t); else expD[i] += pesos(t);
   }
-  const WIN = 30;
-  const roll = arr => { const out = new Float64Array(span); let s = 0;
-    for(let i=0;i<span;i++){ s += arr[i]; if(i>=WIN) s -= arr[i-WIN]; out[i] = s; } return out; };
-  const rInc = roll(incD), rExp = roll(expD);
+  // month-to-date accumulation: climbs with every transaction, resets each
+  // calendar month, so each peak equals that month's total exactly
+  const rInc = new Float64Array(span), rExp = new Float64Array(span);
+  { let mi = 0, me = 0, curM = '';
+    for(let i=0; i<span; i++){
+      const dd = new Date(d0.getTime() + i*DAY);
+      const ym = dd.getFullYear() + '-' + dd.getMonth();
+      if(ym !== curM){ curM = ym; mi = 0; me = 0; }
+      mi += incD[i]; me += expD[i];
+      rInc[i] = mi; rExp[i] = me;
+    }
+  }
   const stepN = Math.max(1, Math.ceil(span/420));
   const idxs = []; for(let i=0;i<span;i+=stepN) idxs.push(i);
   if(idxs[idxs.length-1] !== span-1) idxs.push(span-1);
