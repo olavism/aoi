@@ -642,7 +642,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.2.0 · 2026-06-12';
+const APP_VERSION = '1.2.1 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -1122,11 +1122,35 @@ async function gotrue(path, body){
   if(!r.ok) throw new Error(j.msg || j.error_description || j.message || ('auth error '+r.status));
   return j;
 }
-async function syncSendCode(email){ await gotrue('otp', { email, create_user:true }); }
-async function syncVerify(email, token, pass){
-  const j = await gotrue('verify', { type:'email', email, token });
+/* the account password is derived from the passphrase (Bitwarden-style):
+   the server only ever sees this hash, so it can never decrypt the ledger */
+async function deriveAuthPassword(email, pass){
+  const salt = new TextEncoder().encode('aoi-auth-v1|' + email.trim().toLowerCase());
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name:'PBKDF2', salt, iterations:150000, hash:'SHA-256' }, km, 256);
+  return b64e(bits);
+}
+
+async function syncSignIn(email, pass){
+  const pw = await deriveAuthPassword(email, pass);
+  let j;
+  try{
+    j = await gotrue('token?grant_type=password', { email, password: pw });
+  }catch(e){
+    if(/invalid login credentials/i.test(e.message)){
+      try{
+        j = await gotrue('signup', { email, password: pw });
+      }catch(e2){
+        if(/already registered/i.test(e2.message))
+          throw new Error('Wrong passphrase for this email. Use the same passphrase you chose on your first device.');
+        throw e2;
+      }
+      if(!j.access_token) throw new Error('Account created but needs email confirmation — check your inbox, then sign in again.');
+    } else throw e;
+  }
   sess = { email, uid:j.user.id, access:j.access_token, refresh:j.refresh_token,
-           exp:(j.expires_at||0)*1000, pass, last:0 };
+           exp: j.expires_at ? j.expires_at*1000 : Date.now() + (j.expires_in||3600)*1000,
+           pass, last:0 };
   saveSess();
   await cloudSync(true);
 }
@@ -1143,7 +1167,8 @@ async function rest(path, opts = {}){
   const r = await fetch(SYNC_URL+'/rest/v1/'+path, { ...opts,
     headers:{ apikey:SYNC_KEY, Authorization:'Bearer '+tok, 'Content-Type':'application/json', ...(opts.headers||{}) } });
   if(!r.ok) throw new Error('sync http '+r.status);
-  return r.status===204 ? null : r.json();
+  const txt = await r.text();
+  return txt ? JSON.parse(txt) : null;
 }
 
 /* per-transaction merge: newest edit wins by id, deletions win via tombstones,
@@ -1650,20 +1675,13 @@ function viewSettings(){
           <button class="btn" data-act="sync-off">Sign out</button>
         </p>
         <p class="sub">End-to-end encrypted: your ledger is sealed with your passphrase before it leaves this device. The server only ever stores ciphertext.</p>`
-      : syncStage==='sent' ? `
-        <p class="sub">Code sent to <b>${esc(syncEmail)}</b>. Enter it with your sync passphrase. Use the <b>same passphrase on every device</b>; it is the key to your data and cannot be recovered.</p>
-        <div class="addrow" style="max-width:24rem; margin-bottom:.5rem"><input id="sy-code" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code"></div>
-        <div class="addrow" style="max-width:24rem; margin-bottom:.5rem"><input id="sy-pass" type="password" placeholder="Sync passphrase (min 6 characters)"></div>
-        <p style="display:flex; gap:.6rem">
-          <button class="btn primary" data-act="sync-verify">Verify & enable</button>
-          <button class="btn" data-act="sync-cancel">Cancel</button>
-        </p>`
       : `
-        <p class="sub">Keep this ledger identical on your phone and computer. Sign in with an email code; your data is encrypted with a passphrase before it ever leaves the device.</p>
-        <div class="addrow" style="max-width:24rem">
-          <input id="sy-email" type="email" inputmode="email" autocomplete="email" placeholder="you@email.com">
-          <button class="btn" data-act="sync-send">Send code</button>
-        </div>`}
+        <p class="sub">Keep this ledger identical on your phone and computer. Pick a passphrase and use the
+          <b>same email and passphrase on every device</b>; the passphrase encrypts your data before it ever
+          leaves the device and cannot be recovered if forgotten.</p>
+        <div class="addrow" style="max-width:24rem; margin-bottom:.5rem"><input id="sy-email" type="email" inputmode="email" autocomplete="email" placeholder="you@email.com"></div>
+        <div class="addrow" style="max-width:24rem; margin-bottom:.5rem"><input id="sy-pass" type="password" autocomplete="current-password" placeholder="Sync passphrase (min 6 characters)"></div>
+        <p><button class="btn primary" data-act="sync-go">Enable sync</button></p>`}
     </section>
 
     <section>
@@ -1896,25 +1914,15 @@ document.addEventListener('click', ev => {
     case 'bulk-confirm': bulkApply(selected.size+' marked received / paid', t=>{ t.status = t.type==='Income'?'Received':'Paid'; }); break;
     case 'bulk-pending': bulkApply(selected.size+' marked incoming / due', t=>{ t.status = t.type==='Income'?'Incoming':'Due'; }); break;
     case 'bulk-delete': bulkDelete(); break;
-    case 'sync-send': {
-      const em = $('#sy-email')?.value.trim();
+    case 'sync-go': {
+      const em = $('#sy-email')?.value.trim(), pass = $('#sy-pass')?.value || '';
       if(!em || !em.includes('@')){ failField($('#sy-email')); break; }
-      syncEmail = em;
-      showToast('Sending code…');
-      syncSendCode(em)
-        .then(()=>{ syncStage = 'sent'; render(); showToast('Code sent to ' + em); })
-        .catch(err=>showToast('Could not send: ' + err.message));
-      break; }
-    case 'sync-verify': {
-      const code = $('#sy-code')?.value.trim(), pass = $('#sy-pass')?.value || '';
-      if(!code || code.length < 6){ failField($('#sy-code')); break; }
       if(pass.length < 6){ failField($('#sy-pass')); break; }
-      showToast('Verifying…');
-      syncVerify(syncEmail, code, pass)
-        .then(()=>{ syncStage = 'idle'; render(); showToast('Sync enabled on this device'); })
-        .catch(err=>showToast('Verify failed: ' + err.message));
+      showToast('Connecting…');
+      syncSignIn(em, pass)
+        .then(()=>{ render(); showToast('Sync enabled on this device'); })
+        .catch(err=>showToast(err.message));
       break; }
-    case 'sync-cancel': syncStage = 'idle'; render(); break;
     case 'sync-now': cloudSync(true); break;
     case 'sync-off':
       if(confirm('Stop syncing on this device? Your local data stays.')){
