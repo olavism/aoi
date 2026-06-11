@@ -780,7 +780,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.8.0 · 2026-06-12';
+const APP_VERSION = '1.8.1 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -1219,10 +1219,12 @@ function totals(){
     else { t.status==='Due' ? due+=v : paid+=v; }
   }
   const invest = S.assets.reduce((a,x)=>a + x.qty*x.rate, 0);
+  const savings = (S.savings||[]).reduce((a,s)=>a + s.amount*savRate(s.currency), 0);
+  const wealth = invest + savings;
   const income = received + incoming;
   const expenses = paid + due;
-  return { received, incoming, paid, due, invest, income, expenses,
-           grand: income + invest, net: income + invest - expenses };
+  return { received, incoming, paid, due, invest, savings, wealth, income, expenses,
+           grand: income + wealth, net: income + wealth - expenses };
 }
 
 /* one bucket per month of the selected year, or per year when viewing all time */
@@ -1728,7 +1730,7 @@ function viewOverview(){
     <div><div class="lbl">Total expenses</div><div class="val neg">₱0</div><div class="note">nothing yet</div></div>
     <div><div class="lbl">Net</div><div class="val pos">₱0</div><div class="note">total income − expenses</div></div>
     <div><div class="lbl">Incoming / pending</div><div class="val pend">₱0</div><div class="note">not yet received</div></div>
-    <div><div class="lbl">Investments</div><div class="val">${php0(T.invest)}</div><div class="note">${S.assets.length} holdings</div></div>
+    <div><div class="lbl">Invest & savings</div><div class="val">${php0(T.wealth)}</div><div class="note">${S.assets.length} assets · ${(S.savings||[]).length} funds</div></div>
     <div><div class="lbl">Income this month</div><div class="val">₱0</div><div class="note">nothing yet</div></div>
   </div>
   <section class="wide">
@@ -1751,11 +1753,11 @@ function viewOverview(){
     </div>
   </div>
   <div class="strip num">
-    <div><div class="lbl">Total income</div><div class="val" data-tick="${T.grand}" data-key="grand">${php0(T.grand)}</div><div class="note">incl. ${php0(T.invest)} investments</div></div>
+    <div><div class="lbl">Total income</div><div class="val" data-tick="${T.grand}" data-key="grand">${php0(T.grand)}</div><div class="note">incl. ${php0(T.wealth)} invest & savings</div></div>
     <div><div class="lbl">Total expenses</div><div class="val neg" data-tick="${T.expenses}" data-key="expenses">${php0(T.expenses)}</div><div class="note">${php0(T.due)} still due</div></div>
     <div><div class="lbl">Net</div><div class="val ${T.net>=0?'pos':'neg'}" data-tick="${T.net}" data-key="net">${php0(T.net)}</div><div class="note">total income − expenses</div></div>
     <div><div class="lbl">Incoming / pending</div><div class="val pend" data-tick="${T.incoming}" data-key="incoming">${php0(T.incoming)}</div><div class="note">not yet received</div></div>
-    <div><div class="lbl">Investments</div><div class="val" data-tick="${T.invest}" data-key="invest">${php0(T.invest)}</div><div class="note">${S.assets.filter(a=>a.qty>0).length} holdings</div></div>
+    <div><div class="lbl">Invest & savings</div><div class="val" data-tick="${T.wealth}" data-key="invest">${php0(T.wealth)}</div><div class="note">${S.assets.filter(a=>a.qty>0).length} assets · ${(S.savings||[]).length} funds</div></div>
     <div><div class="lbl">Income this month</div><div class="val" data-tick="${mCur}" data-key="mincome">${php0(mCur)}</div><div class="note">${deltaNote}</div></div>
   </div>
 
@@ -2505,7 +2507,27 @@ document.addEventListener('click', ev => {
   }
 
   const delClient = ev.target.closest('[data-del-client]');
-  if(delClient){ const [gone] = S.clients.splice(+delClient.dataset.delClient,1); if(gone) (S.cliTomb ||= {})[gone.toLowerCase()] = Date.now(); save(); render(); return; }
+  if(delClient){
+    const [gone] = S.clients.splice(+delClient.dataset.delClient,1);
+    if(!gone) return;
+    (S.cliTomb ||= {})[gone.toLowerCase()] = Date.now();
+    // retag this client's transactions so nothing points at a deleted name
+    if(!S.clients.includes('N/A')) S.clients.push('N/A');
+    const retagged = [];
+    S.tx.forEach(t=>{ if(t.client===gone){ t.client = 'N/A'; t.u = Date.now(); retagged.push(t); } });
+    haptic(12);
+    save(); render();
+    showToast(retagged.length
+      ? `Removed ${gone} · ${retagged.length} transaction${retagged.length===1?'':'s'} moved to N/A`
+      : `Removed ${gone}`,
+      ()=>{
+        S.cliTomb[gone.toLowerCase()] = -Date.now();
+        if(!S.clients.includes(gone)) S.clients.push(gone);
+        retagged.forEach(t=>{ t.client = gone; t.u = Date.now(); });
+        save();
+      });
+    return;
+  }
   const delCat = ev.target.closest('[data-del-cat]');
   if(delCat){ const [gone] = S.categories.splice(+delCat.dataset.delCat,1); if(gone) (S.catTomb ||= {})[gone.toLowerCase()] = Date.now(); save(); render(); return; }
 
