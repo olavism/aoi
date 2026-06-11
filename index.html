@@ -316,10 +316,38 @@
   #panel{
     position:fixed; top:0; right:0; bottom:0; width:25.5rem; max-width:100vw;
     background:var(--surface); border-left:1px solid var(--line);
-    transform:translateX(102%); transition:transform .24s cubic-bezier(.16,1,.3,1);
+    transform:translateX(102%);
+    transition:transform .24s cubic-bezier(.16,1,.3,1), background .4s ease-out;
     z-index:31; display:flex; flex-direction:column;
     box-shadow:-20px 0 60px oklch(5% 0.004 230 / .5);
   }
+  /* ambient mode: the whole sheet shifts color with the transaction type */
+  #panel.exp{
+    background:
+      radial-gradient(30rem 18rem at 50% -5rem, oklch(38% 0.13 15 / .35), transparent 70%),
+      var(--surface);
+  }
+  #panel.inc{
+    background:
+      radial-gradient(30rem 18rem at 50% -5rem, oklch(40% 0.1 145 / .22), transparent 70%),
+      var(--surface);
+  }
+  #panel.exp .seg button.on{ background:var(--expense-tint); color:var(--expense); }
+  #panel.inc .seg button.on{ background:var(--income-tint); color:var(--income); }
+  #panel.exp :is(input,select,textarea):focus-visible{
+    border-color:var(--expense); box-shadow:0 0 0 3px var(--expense-glow), 0 0 14px var(--expense-glow); }
+  #panel.inc :is(input,select,textarea):focus-visible{
+    border-color:var(--income); box-shadow:0 0 0 3px oklch(89% 0.27 134 / .25), 0 0 14px var(--income-glow); }
+  #panel.exp .p-foot .btn.primary{
+    background:var(--expense); border-color:var(--expense); color:oklch(97% 0.005 230);
+    box-shadow:0 0 16px -4px var(--expense); }
+  #panel.exp .p-foot .btn.primary:hover{ background:oklch(72% 0.21 15); }
+  #panel.inc .p-foot .btn.primary{
+    background:var(--income); border-color:var(--income); color:oklch(15% 0.005 230);
+    box-shadow:0 0 16px -4px var(--income); }
+  #panel.inc .p-foot .btn.primary:hover{ background:oklch(93% 0.25 134); }
+  #panel.exp .php-preview b{ color:var(--expense); }
+  #panel.inc .php-preview b{ color:var(--income); }
   #panel.show{ transform:translateX(0); }
   #panel .p-head{ display:flex; align-items:center; justify-content:space-between; padding:1rem 1.5rem; border-bottom:1px solid var(--line-soft); }
   #panel .p-head h2{ margin:0; }
@@ -642,7 +670,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.2.2 · 2026-06-12';
+const APP_VERSION = '1.2.3 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -1753,6 +1781,8 @@ function statusChoices(type){ return type==='Income' ? ['Received','Incoming'] :
 function renderPanel(){
   const e = editing; if(!e) return;
   const isNew = e.id===null;
+  $('#panel').classList.toggle('exp', e.type==='Expense');
+  $('#panel').classList.toggle('inc', e.type==='Income');
   $('#panel').innerHTML = `
   <div class="sheet-handle" aria-hidden="true"></div>
   <div class="p-head">
@@ -1895,6 +1925,7 @@ document.addEventListener('click', ev => {
     editing.type = segBtn.dataset.type;
     editing.status = statusChoices(editing.type)[editing.status==='Incoming'||editing.status==='Due' ? 1 : 0];
     if(wasNew){ const d = typeDefaults(editing.type); editing.client = d.client; editing.category = d.category; }
+    haptic(8);
     renderPanel(); return;
   }
 
