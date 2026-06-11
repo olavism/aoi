@@ -724,7 +724,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.5.2 · 2026-06-12';
+const APP_VERSION = '1.6.0 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -1330,13 +1330,16 @@ function mergeStates(local, remote){
   return out;
 }
 
+let remoteSeen = 0, selfPushAt = 0;
+
 async function cloudSync(force){
   if(!sess || syncBusy) return;
   if(!navigator.onLine && !force) return;
   syncBusy = true; cloudState = 'syncing'; refreshSyncUI();
   try{
-    const rows = await rest('ledgers?select=data');
+    const rows = await rest('ledgers?select=data,updated_at');
     if(rows && rows[0]){
+      remoteSeen = Date.parse(rows[0].updated_at) || 0;
       let remote = null;
       try{ remote = await decState(rows[0].data, sess.pass); }
       catch{ cloudState = 'badpass'; syncBusy = false; refreshSyncUI(); return; }
@@ -1348,16 +1351,79 @@ async function cloudSync(force){
     await rest('ledgers', { method:'POST',
       headers:{ Prefer:'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify([{ user_id: sess.uid, data: cipher, updated_at: new Date().toISOString() }]) });
+    selfPushAt = Date.now();
+    remoteSeen = Date.now();
     sess.last = Date.now(); saveSess();
     cloudState = 'ok';
   }catch(e){ cloudState = 'error'; }
   syncBusy = false;
   refreshSyncUI();
+  rtConnect(); // make sure the live channel is up whenever sync succeeds
 }
 function scheduleCloudPush(){
   if(!sess) return;
   clearTimeout(pushTimer);
   pushTimer = setTimeout(()=>cloudSync(), 3000);
+}
+
+/* ---------- live updates: realtime websocket + polling fallback ----------
+   Each device subscribes to its own ledger row; when another device pushes,
+   the change arrives over the socket and triggers a pull within moments. */
+let rtWs = null, rtRef = 0, rtHb = null, rtPullTimer = null, rtTokenAt = 0;
+
+function rtConnect(){
+  if(!sess || rtWs || !navigator.onLine) return;
+  let ws;
+  try{ ws = new WebSocket(SYNC_URL.replace('https://','wss://') + '/realtime/v1/websocket?apikey=' + SYNC_KEY + '&vsn=1.0.0'); }
+  catch{ return; }
+  rtWs = ws;
+  ws.onopen = async () => {
+    let tok = null;
+    try{ tok = await freshToken(); }catch{}
+    if(!tok || ws !== rtWs){ try{ ws.close(); }catch{} return; }
+    rtTokenAt = Date.now();
+    ws.send(JSON.stringify({ topic:'realtime:ledger', event:'phx_join', ref:String(++rtRef),
+      payload:{ access_token: tok, config:{ postgres_changes:[
+        { event:'*', schema:'public', table:'ledgers', filter:'user_id=eq.'+sess.uid }
+      ]}}}));
+    clearInterval(rtHb);
+    rtHb = setInterval(async () => {
+      if(ws !== rtWs || ws.readyState !== 1) return;
+      try{ ws.send(JSON.stringify({ topic:'phoenix', event:'heartbeat', payload:{}, ref:String(++rtRef) })); }catch{}
+      if(Date.now() - rtTokenAt > 15*60*1000){
+        rtTokenAt = Date.now();
+        try{ const t2 = await freshToken();
+          ws.send(JSON.stringify({ topic:'realtime:ledger', event:'access_token', payload:{ access_token:t2 }, ref:String(++rtRef) }));
+        }catch{}
+      }
+    }, 25000);
+  };
+  ws.onmessage = ev => {
+    try{
+      const m = JSON.parse(ev.data);
+      if(m.event === 'postgres_changes'){
+        if(Date.now() - selfPushAt < 2500) return; // that was our own push echoing back
+        clearTimeout(rtPullTimer);
+        rtPullTimer = setTimeout(()=>cloudSync(), 700);
+      }
+    }catch{}
+  };
+  ws.onclose = () => {
+    if(ws !== rtWs) return;
+    rtWs = null; clearInterval(rtHb);
+    if(sess) setTimeout(rtConnect, 5000);
+  };
+  ws.onerror = () => { try{ ws.close(); }catch{} };
+}
+
+/* polling fallback: a featherweight timestamp check in case the socket is down */
+async function cloudPeek(){
+  if(!sess || syncBusy || !navigator.onLine || document.visibilityState!=='visible') return;
+  try{
+    const rows = await rest('ledgers?select=updated_at');
+    const ts = rows?.[0]?.updated_at ? Date.parse(rows[0].updated_at) : 0;
+    if(ts > remoteSeen + 1500) await cloudSync();
+  }catch{}
 }
 function refreshSyncUI(){
   const ae = document.activeElement;
@@ -1856,7 +1922,9 @@ function viewSettings(){
           <button class="btn" data-act="sync-now">Sync now</button>
           <button class="btn" data-act="sync-off">Sign out</button>
         </p>
-        <p class="sub">End-to-end encrypted: your ledger is sealed with your passphrase before it leaves this device. The server only ever stores ciphertext.</p>`
+        <p class="sub">Sync is automatic: edits push a few seconds after you make them, and changes from your
+          other devices arrive live. End-to-end encrypted: your ledger is sealed with your passphrase
+          before it leaves this device, and the server only ever stores ciphertext.</p>`
       : `
         <p class="sub">Keep this ledger identical on your phone and computer. Pick a passphrase and use the
           <b>same email and passphrase on every device</b>; the passphrase encrypts your data before it ever
@@ -2210,7 +2278,9 @@ document.addEventListener('click', ev => {
     case 'sync-now': cloudSync(true); break;
     case 'sync-off':
       if(confirm('Stop syncing on this device? Your local data stays.')){
-        sess = null; saveSess(); cloudState = 'idle'; render();
+        sess = null; saveSess(); cloudState = 'idle';
+        try{ rtWs?.close(); }catch{} rtWs = null; clearInterval(rtHb);
+        render();
       } break;
     case 'fr-fresh':
       $('#fr-choice').hidden = true;
@@ -2518,7 +2588,8 @@ updateSyncUI();
 syncRates();
 cloudSync();
 setInterval(syncRates, 30*60*1000);
-document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') cloudSync(); });
+setInterval(cloudPeek, 4*60*1000);
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible'){ cloudSync(); rtConnect(); } });
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js').catch(()=>{}); }
 setTimeout(()=>{ const sp = $('#splash'); if(sp){ sp.classList.add('done'); setTimeout(()=>sp.remove(), 600); } }, 700);
 
