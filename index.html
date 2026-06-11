@@ -441,6 +441,38 @@
   #toast button{ appearance:none; border:0; cursor:pointer; font:inherit; font-weight:600;
                  color:var(--accent); background:var(--accent-tint); border-radius:8px; padding:.3rem .7rem; }
 
+  /* what's new */
+  #wn-btn{ position:relative; }
+  #wn-btn.nudge::after{
+    content:''; position:absolute; top:.15rem; right:.2rem;
+    width:.42rem; height:.42rem; border-radius:50%;
+    background:var(--accent); box-shadow:0 0 8px var(--accent);
+  }
+  #whatsnew{
+    position:fixed; inset:0; z-index:55;
+    display:flex; align-items:flex-end; justify-content:center;
+    background:oklch(8% 0.004 230 / .55);
+    backdrop-filter:blur(2px); -webkit-backdrop-filter:blur(2px);
+  }
+  #whatsnew[hidden]{ display:none; }
+  .wn-card{ width:min(26rem, calc(100% - 2rem)); max-height:min(75dvh, 34rem); }
+  .wn-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:.4rem; }
+  .wn-body{ overflow-y:auto; display:flex; flex-direction:column; gap:1.1rem; text-align:left;
+            padding-right:.25rem; }
+  .wn-entry{ border-top:1px solid var(--line-soft); padding-top:1rem; }
+  .wn-entry:first-child{ border-top:0; padding-top:0; }
+  .wn-ver{ display:flex; align-items:center; gap:.5rem; margin-bottom:.35rem; flex-wrap:wrap; }
+  .wn-ver .d{ white-space:nowrap; }
+  .wn-ver b{ font-size:.875rem; color:var(--ink); }
+  .wn-ver .chip{ font-size:.625rem; }
+  .wn-ver .d{ color:var(--faint); font-size:.71875rem; margin-left:auto; }
+  .wn-entry ul{ margin:.2rem 0 0; padding-left:1.1rem; color:var(--muted); font-size:.8125rem; line-height:1.55; }
+  .wn-entry li{ margin-bottom:.25rem; }
+  .wn-entry li::marker{ color:var(--accent); }
+  @media (min-width: 881px){
+    #whatsnew{ align-items:center; }
+  }
+
   /* recurring scope ask sheet */
   #scopeask{
     position:fixed; inset:0; z-index:55;
@@ -709,7 +741,7 @@
 </div>
 <header class="top">
   <div class="brand">aoi<i aria-hidden="true"></i><small>cashflow ledger</small></div>
-  <div class="right"><button class="iconbtn" id="eye" data-act="privacy" aria-label="Hide amounts"></button><span id="syncLbl" class="num"></span><span id="todayLbl" class="num"></span></div>
+  <div class="right"><button class="iconbtn" id="wn-btn" data-act="whatsnew" aria-label="What's new"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2a4 4 0 0 0-4 4c0 3.2-1.4 4.4-1.4 4.4h10.8S12 9.4 12 6.2a4 4 0 0 0-4-4z"/><path d="M6.6 13.2a1.5 1.5 0 0 0 2.8 0"/></svg></button><button class="iconbtn" id="eye" data-act="privacy" aria-label="Hide amounts"></button><span id="syncLbl" class="num"></span><span id="todayLbl" class="num"></span></div>
 </header>
 <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
 
@@ -718,6 +750,12 @@
 <div id="backdrop"></div>
 <aside id="panel" aria-label="Transaction editor"></aside>
 <div id="toast" role="status"><span></span><button>Undo</button></div>
+<div id="whatsnew" hidden>
+  <div class="sa-card wn-card">
+    <div class="wn-head"><h2 style="margin:0">What's new</h2><button class="x" data-act="wn-close" aria-label="Close">×</button></div>
+    <div class="wn-body" id="wn-list"></div>
+  </div>
+</div>
 <div id="scopeask" hidden>
   <div class="sa-card">
     <p class="t"></p>
@@ -742,7 +780,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.7.2 · 2026-06-12';
+const APP_VERSION = '1.8.0 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -958,6 +996,46 @@ function seriesOf(t){
   const k = [t.desc, t.client, t.category, t.currency, t.type].join('|');
   return S.tx.filter(x=>x.recurring && [x.desc, x.client, x.category, x.currency, x.type].join('|')===k);
 }
+/* ---------- what's new ---------- */
+const CHANGELOG = [
+  { v:'1.7', d:'Jun 12, 2026', t:'Investments & Savings', pts:[
+    'Track crypto, gold, and cash savings side by side, with distribution charts',
+    'Pick investments from a dropdown of auto-priced assets, or add your own',
+    'Deletes now stay deleted everywhere: duplicates fixed for good' ]},
+  { v:'1.6', d:'Jun 12, 2026', t:'Live sync', pts:[
+    'Edits appear on your other devices within a second, automatically',
+    'No more Sync button needed: it just stays in sync' ]},
+  { v:'1.5', d:'Jun 12, 2026', t:'Smarter recurring & support', pts:[
+    'Recurring entries create the whole year ahead for you',
+    'Editing one asks: just this one, or the whole series?',
+    'Contact support from Settings via WhatsApp, Messenger, or email' ]},
+  { v:'1.3', d:'Jun 12, 2026', t:'Faster entry', pts:[
+    'The description field suggests past entries and fills in their details',
+    'Expense mode glows red, income glows green — no more mix-ups' ]},
+  { v:'1.2', d:'Jun 12, 2026', t:'Sync across devices', pts:[
+    'One email + passphrase keeps your phone and computer identical',
+    'End-to-end encrypted: the server only ever sees ciphertext' ]},
+];
+
+function wnUnseen(){
+  let seen = ''; try{ seen = localStorage.getItem('aoi-seenver') || ''; }catch{}
+  return seen !== CHANGELOG[0].v;
+}
+function wnRefreshDot(){ $('#wn-btn')?.classList.toggle('nudge', wnUnseen()); }
+function wnOpen(){
+  $('#wn-list').innerHTML = CHANGELOG.map((e,i)=>`
+    <div class="wn-entry">
+      <div class="wn-ver"><b>${esc(e.t)}</b>
+        ${i===0 ? '<span class="chip received">NEW</span>' : ''}
+        <span class="d num">v${e.v} · ${e.d}</span></div>
+      <ul>${e.pts.map(p=>`<li>${esc(p)}</li>`).join('')}</ul>
+    </div>`).join('');
+  $('#whatsnew').hidden = false;
+  try{ localStorage.setItem('aoi-seenver', CHANGELOG[0].v); }catch{}
+  wnRefreshDot();
+  haptic(6);
+}
+
 /* first-run client onboarding */
 const frClients = [];
 function frClientAdd(){
@@ -2330,6 +2408,8 @@ async function saveTx(){
 /* ============================== events ============================== */
 
 document.addEventListener('click', ev => {
+  if(ev.target.id==='whatsnew'){ $('#whatsnew').hidden = true; return; }
+
   const sc = ev.target.closest('[data-scope]');
   if(sc || ev.target.id==='scopeask'){
     $('#scopeask').hidden = true;
@@ -2496,6 +2576,8 @@ document.addEventListener('click', ev => {
     case 'add': openPanel(null); break;
     case 'close': closePanel(); break;
     case 'save-tx': saveTx(); break;
+    case 'whatsnew': wnOpen(); break;
+    case 'wn-close': $('#whatsnew').hidden = true; break;
     case 'privacy':
       privacy = !privacy;
       try{ localStorage.setItem('aoi-privacy', privacy?'1':'0'); }catch{}
@@ -2824,6 +2906,7 @@ rollRecurring();
 buildTabs();
 render();
 applyPrivacy();
+wnRefreshDot();
 updateSyncUI();
 syncRates();
 cloudSync();
