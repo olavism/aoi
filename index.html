@@ -277,23 +277,24 @@
   input[type=search]{ width:14rem; }
   ::placeholder{ color:var(--faint); text-transform:none; }
 
-  button.btn{
+  .btn{
     font:inherit; font-weight:550; cursor:pointer; border-radius:8px;
     padding:.45rem .9rem; border:1px solid var(--line);
     background:var(--raised); color:var(--ink);
     transition:background .15s ease-out, border-color .15s ease-out, box-shadow .2s ease-out, transform .12s ease-out;
+    text-decoration:none; display:inline-block; text-align:center;
   }
-  button.btn:hover{ background:var(--line-soft); border-color:var(--line); }
-  button.btn:active{ transform:scale(.97); }
-  button.btn:focus-visible{ outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--focus); }
-  button.btn.primary{
+  .btn:hover{ background:var(--line-soft); border-color:var(--line); }
+  .btn:active{ transform:scale(.97); }
+  .btn:focus-visible{ outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--focus); }
+  .btn.primary{
     background:var(--accent); border-color:var(--accent); color:oklch(15% 0.005 230);
     box-shadow:0 0 16px -4px var(--accent);
   }
-  button.btn.primary:hover{ background:oklch(85% 0.12 200); box-shadow:0 0 22px -4px var(--accent); }
-  button.btn.danger{ color:var(--expense); }
-  button.btn.danger:hover{ background:var(--expense-tint); border-color:oklch(64% 0.235 16 / .35); }
-  button.btn:disabled{ opacity:.45; cursor:default; }
+  .btn.primary:hover{ background:oklch(85% 0.12 200); box-shadow:0 0 22px -4px var(--accent); }
+  .btn.danger{ color:var(--expense); }
+  .btn.danger:hover{ background:var(--expense-tint); border-color:oklch(64% 0.235 16 / .35); }
+  .btn:disabled{ opacity:.45; cursor:default; }
 
   /* transactions table */
   .tx-scroll{ overflow-x:auto; border-top:1px solid var(--line); }
@@ -430,6 +431,32 @@
   #toast.show{ opacity:1; transform:translateX(-50%) translateY(0); pointer-events:auto; }
   #toast button{ appearance:none; border:0; cursor:pointer; font:inherit; font-weight:600;
                  color:var(--accent); background:var(--accent-tint); border-radius:8px; padding:.3rem .7rem; }
+
+  /* recurring scope ask sheet */
+  #scopeask{
+    position:fixed; inset:0; z-index:55;
+    display:flex; align-items:flex-end; justify-content:center;
+    background:oklch(8% 0.004 230 / .55);
+    backdrop-filter:blur(2px); -webkit-backdrop-filter:blur(2px);
+  }
+  #scopeask[hidden]{ display:none; }
+  .sa-card{
+    display:flex; flex-direction:column; gap:.55rem;
+    width:min(22rem, calc(100% - 2rem));
+    margin-bottom:calc(1.25rem + env(safe-area-inset-bottom));
+    padding:1.1rem 1.1rem 1.2rem; border-radius:16px;
+    background:linear-gradient(135deg, oklch(55% 0.012 230 / .14), oklch(25% 0.008 230 / .55));
+    backdrop-filter:blur(20px) saturate(160%); -webkit-backdrop-filter:blur(20px) saturate(160%);
+    border:1px solid oklch(98% 0 0 / .12);
+    box-shadow:0 18px 50px oklch(0% 0 0 / .55), inset 0 1px 0 oklch(100% 0 0 / .12);
+    animation:rise .25s cubic-bezier(.16,1,.3,1);
+  }
+  .sa-card .t{ margin:0 0 .35rem; font-size:.875rem; color:var(--ink); text-align:center; }
+  .sa-card .btn{ width:100%; padding:.6rem; }
+  @media (min-width: 881px){
+    #scopeask{ align-items:center; }
+    .sa-card{ margin-bottom:0; }
+  }
 
   /* pull-to-refresh indicator */
   #ptr{
@@ -659,6 +686,14 @@
 <div id="backdrop"></div>
 <aside id="panel" aria-label="Transaction editor"></aside>
 <div id="toast" role="status"><span></span><button>Undo</button></div>
+<div id="scopeask" hidden>
+  <div class="sa-card">
+    <p class="t"></p>
+    <button class="btn primary" data-scope="one">Only this one</button>
+    <button class="btn" data-scope="all">All in this series</button>
+    <button class="btn" data-scope="cancel">Cancel</button>
+  </div>
+</div>
 <div id="bulkbar" hidden>
   <span class="num" id="bb-count">0 selected</span>
   <button class="btn" data-act="bulk-all">All</button>
@@ -675,7 +710,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.4.1 · 2026-06-12';
+const APP_VERSION = '1.5.0 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -843,16 +878,36 @@ function haptic(ms){
   try{ hapticEl.click(); }catch{}
 }
 
-/* ---------- toast with undo ---------- */
+/* ---------- toast with action ---------- */
 let toastTimer = null, toastUndo = null;
-function showToast(msg, undoFn){
+function showToast(msg, actionFn, actionLabel){
   const el = $('#toast');
-  toastUndo = undoFn || null;
+  toastUndo = actionFn || null;
   el.querySelector('span').textContent = msg;
-  el.querySelector('button').style.display = undoFn ? '' : 'none';
+  const b = el.querySelector('button');
+  b.style.display = actionFn ? '' : 'none';
+  b.textContent = actionLabel || 'Undo';
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(()=> el.classList.remove('show'), 5000);
+}
+
+/* ---------- recurring series ---------- */
+function seriesOf(t){
+  if(t.sid) return S.tx.filter(x=>x.sid===t.sid);
+  if(!t.recurring) return [t];
+  const k = [t.desc, t.client, t.category, t.currency, t.type].join('|');
+  return S.tx.filter(x=>x.recurring && [x.desc, x.client, x.category, x.currency, x.type].join('|')===k);
+}
+let scopeResolve = null;
+function askScope(title){
+  return new Promise(res=>{
+    scopeResolve = res;
+    const el = $('#scopeask');
+    el.querySelector('.t').textContent = title;
+    el.hidden = false;
+    haptic(8);
+  });
 }
 
 /* ---------- quick actions ---------- */
@@ -867,15 +922,26 @@ function flipStatus(id){
   showToast(`${t.desc} → ${t.status}`, ()=>{ t.status = prev; t.u = prevU; save(); });
 }
 
-function deleteTx(id){
+async function deleteTx(id){
   const i = S.tx.findIndex(t=>sameId(t.id,id)); if(i<0) return;
-  const [gone] = S.tx.splice(i,1);
-  (S.deleted ||= {})[String(gone.id)] = Date.now();
+  const target = S.tx[i];
+  const members = seriesOf(target);
+  let all = false;
+  if(members.length > 1){
+    const sc = await askScope(`"${target.desc}" repeats ${members.length} times. Delete…`);
+    if(sc==='cancel') return;
+    all = sc==='all';
+  }
+  const goneList = all ? members : [target];
+  const goneIds = new Set(goneList.map(t=>String(t.id)));
+  S.tx = S.tx.filter(t=>!goneIds.has(String(t.id)));
+  S.deleted ||= {};
+  goneList.forEach(t=>{ S.deleted[String(t.id)] = Date.now(); });
   haptic(16);
   save(); render();
-  showToast(`Deleted "${gone.desc}"`, ()=>{
-    delete S.deleted[String(gone.id)];
-    S.tx.splice(Math.min(i,S.tx.length), 0, gone); save();
+  showToast(all ? `Deleted ${goneList.length} occurrences` : `Deleted "${target.desc}"`, ()=>{
+    goneList.forEach(t=>delete S.deleted[String(t.id)]);
+    S.tx.push(...goneList); save();
   });
 }
 
@@ -1300,7 +1366,7 @@ function moveBlob(){
 
 function setActiveTab(){
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.go===route));
-  const overdue = S.tx.length>0 && (!S.lastBackup || Date.now()-S.lastBackup > 14*864e5);
+  const overdue = S.tx.length>0 && (!S.lastBackup || Date.now()-S.lastBackup > 7*864e5);
   document.querySelector('#tabs button[data-go="settings"]')?.classList.toggle('nudge', overdue);
   requestAnimationFrame(moveBlob);
 }
@@ -1432,7 +1498,7 @@ function viewOverview(){
       <div class="legend">
         <span><i style="background:var(--income);box-shadow:0 0 6px var(--income-glow)"></i>Income</span>
         <span><i style="background:var(--expense);box-shadow:0 0 6px var(--expense-glow)"></i>Expenses</span>
-        <span style="color:var(--faint)">month to date</span>
+        <span style="color:var(--faint)">monthly</span>
       </div>
       <div class="chart-wrap see" data-see="chart">${chartSVG(months)}<div class="chart-tip" hidden></div></div>
     </section>
@@ -1514,46 +1580,14 @@ function chartSVG(months){
   const iw = W-padL-padR, ih = H-padT-padB;
   const baseY = padT + ih;
 
-  // daily-resolution series: trailing 30-day totals, so every single
-  // transaction nudges the curve the day it lands and decays out 30 days later
-  const DAY = 864e5;
-  const txs = S.tx.filter(inYear);
-  let d0, d1;
-  if(YEAR==='all'){
-    const ds = txs.map(t=>t.date).sort();
-    d0 = new Date(ds[0]+'T00:00:00'); d1 = new Date(ds[ds.length-1]+'T00:00:00');
-  } else {
-    d0 = new Date(YEAR+'-01-01T00:00:00'); d1 = new Date(YEAR+'-12-31T00:00:00');
-  }
-  const span = Math.max(2, Math.round((d1-d0)/DAY)+1);
-  const dayIdx = iso => Math.round((new Date(iso+'T00:00:00')-d0)/DAY);
-  const incD = new Float64Array(span), expD = new Float64Array(span);
-  for(const t of txs){
-    const i = dayIdx(t.date);
-    if(i<0 || i>=span) continue;
-    if(t.type==='Income') incD[i] += pesos(t); else expD[i] += pesos(t);
-  }
-  // month-to-date accumulation: climbs with every transaction, resets each
-  // calendar month, so each peak equals that month's total exactly
-  const rInc = new Float64Array(span), rExp = new Float64Array(span);
-  { let mi = 0, me = 0, curM = '';
-    for(let i=0; i<span; i++){
-      const dd = new Date(d0.getTime() + i*DAY);
-      const ym = dd.getFullYear() + '-' + dd.getMonth();
-      if(ym !== curM){ curM = ym; mi = 0; me = 0; }
-      mi += incD[i]; me += expD[i];
-      rInc[i] = mi; rExp[i] = me;
-    }
-  }
-  const stepN = Math.max(1, Math.ceil(span/420));
-  const idxs = []; for(let i=0;i<span;i+=stepN) idxs.push(i);
-  if(idxs[idxs.length-1] !== span-1) idxs.push(span-1);
-
-  const maxRaw = Math.max(1, ...idxs.map(i=>Math.max(rInc[i], rExp[i])));
+  // one point per month: the curve reacts to monthly totals, so it stays
+  // aloft on recurring income instead of diving to the floor between payments
+  const maxRaw = Math.max(1, ...months.map(m=>Math.max(m.received+m.incoming, m.expenses)));
   const step = maxRaw>200000 ? 50000 : 25000;
   const max = Math.ceil(maxRaw/step)*step;
   const y = v => padT + ih - (v/max)*ih;
-  const X = i => padL + (i/(span-1))*iw;
+  const n = months.length || 1;
+  const slot = iw/n;
 
   let g = '';
   for(let v=0; v<=max; v+=step){
@@ -1561,21 +1595,12 @@ function chartSVG(months){
          `<text x="${padL-8}" y="${y(v)+3.5}" text-anchor="end" font-size="10" fill="var(--faint)">${v? (v/1000)+'k' : '0'}</text>`;
   }
 
-  const incPts = idxs.map(i=>[X(i), y(rInc[i])]);
-  const expPts = idxs.map(i=>[X(i), y(rExp[i])]);
+  const incPts = months.map((m,i)=>[padL + slot*i + slot/2, y(m.received + m.incoming)]);
+  const expPts = months.map((m,i)=>[padL + slot*i + slot/2, y(m.expenses)]);
 
-  // month labels centered on each period's span of days
-  const periodStart = m => YEAR==='all' ? m.key+'-01-01' : m.key+'-01';
-  const periodEnd = m => {
-    if(YEAR==='all') return (+m.key+1)+'-01-01';
-    const [yy,mm] = m.key.split('-').map(Number);
-    return `${mm===12?yy+1:yy}-${String(mm===12?1:mm+1).padStart(2,'0')}-01`;
-  };
   let labels = '';
-  months.forEach(m=>{
-    const a = Math.max(0, dayIdx(periodStart(m))), b = Math.min(span-1, dayIdx(periodEnd(m))-1);
-    if(b<=a) return;
-    labels += `<text x="${(X(a)+X(b))/2}" y="${H-8}" text-anchor="middle" font-size="10" fill="var(--muted)">${m.axis}</text>`;
+  months.forEach((m,i)=>{
+    labels += `<text x="${padL + slot*i + slot/2}" y="${H-8}" text-anchor="middle" font-size="10" fill="var(--muted)">${m.axis}</text>`;
   });
 
   const incLine = smoothPath(incPts);
@@ -1603,13 +1628,10 @@ function chartSVG(months){
       ${incPts.length===1 ? `<circle cx="${incPts[0][0]}" cy="${incPts[0][1]}" r="4" fill="var(--income)"/>` : ''}
     </g>`;
 
-  const hits = months.map(m=>{
-    const a = Math.max(0, dayIdx(periodStart(m))), b = Math.min(span-1, dayIdx(periodEnd(m))-1);
-    if(b<=a) return '';
-    return `<rect data-month="${m.key}" data-label="${m.full}" data-rec="${m.received}" data-inc="${m.incoming}" data-exp="${m.expenses}" x="${X(a).toFixed(1)}" y="${padT}" width="${(X(b)-X(a)).toFixed(1)}" height="${ih+padB}" fill="transparent" style="cursor:pointer"/>`;
-  }).join('');
+  const hits = months.map((m,i)=>
+    `<rect data-month="${m.key}" data-label="${m.full}" data-rec="${m.received}" data-inc="${m.incoming}" data-exp="${m.expenses}" x="${(padL + slot*i).toFixed(1)}" y="${padT}" width="${slot.toFixed(1)}" height="${ih+padB}" fill="transparent" style="cursor:pointer"/>`).join('');
 
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cashflow, trailing 30-day totals">${defs}${g}${series}${labels}${hits}</svg>`;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Monthly cashflow">${defs}${g}${series}${labels}${hits}</svg>`;
 }
 
 /* ---------- transactions ---------- */
@@ -1711,14 +1733,18 @@ function viewTx(){
 
 function viewInvest(){
   const total = S.assets.reduce((a,x)=>a + x.qty*x.rate, 0);
+  const intro = `<p class="sub" style="max-width:46rem; margin:-.75rem 0 1.25rem">This is your investments corner: track the crypto, stocks, and gold you hold,
+    and watch their peso value move with the market. Supported assets revalue automatically on every rate sync.</p>`;
   if(!S.assets.length) return `
   <div class="inv-total num"><span class="sub">Portfolio value</span>₱0</div>
+  ${intro}
   <div class="empty-hero" style="max-width:46rem">
     <p>No assets tracked yet. Add crypto, gold, or anything else you hold; BTC, ETH, USDT, and XAU revalue automatically.</p>
     <button class="btn primary" data-act="add-asset">Add an asset</button>
   </div>`;
   return `
   <div class="inv-total num"><span class="sub">Portfolio value</span>${php0(total)}</div>
+  ${intro}
   <div class="scroll-x">
   <table class="inv-table num" style="max-width:46rem">
     <thead><tr><th>Asset</th><th class="r">Quantity</th><th class="r">Rate → PHP</th><th class="r">Value (PHP)</th><th></th></tr></thead>
@@ -1809,6 +1835,16 @@ function viewSettings(){
         <div class="addrow" style="max-width:24rem; margin-bottom:.5rem"><input id="sy-email" type="email" inputmode="email" autocomplete="email" placeholder="you@email.com"></div>
         <div class="addrow" style="max-width:24rem; margin-bottom:.5rem"><input id="sy-pass" type="password" autocomplete="current-password" placeholder="Sync passphrase (min 6 characters)"></div>
         <p><button class="btn primary" data-act="sync-go">Enable sync</button></p>`}
+    </section>
+
+    <section>
+      <h2>Contact support</h2>
+      <p class="sub">Questions, a bug, or an idea? Reach out any way you like.</p>
+      <p style="display:flex; gap:.6rem; flex-wrap:wrap">
+        <a class="btn" href="https://wa.me/639462503527" target="_blank" rel="noopener">WhatsApp</a>
+        <a class="btn" href="https://m.me/olavikun" target="_blank" rel="noopener">Messenger</a>
+        <a class="btn" href="mailto:olavivillagonzalo@gmail.com">Email</a>
+      </p>
     </section>
 
     <section>
@@ -1980,26 +2016,73 @@ function failField(el){
   el.focus();
 }
 
-function saveTx(){
+async function saveTx(){
   pullPanel();
   const e = editing;
   if(!e.desc.trim()){ failField($('#e-desc')); return; }
   if(!(e.amount>0)){ failField($('#e-amount')); return; }
   const isNew = e.id===null;
   e.u = Date.now();
-  if(isNew){ e.id = genId(); S.tx.push(e); }
-  else { const i = S.tx.findIndex(t=>sameId(t.id,e.id)); if(i>=0) S.tx[i] = e; }
+  let extra = '';
+
+  if(isNew){
+    e.id = genId();
+    if(e.recurring){
+      // spawn the rest of the year's occurrences up front
+      e.sid = 's' + e.id;
+      const [yy, mm, dd] = e.date.split('-').map(Number);
+      const copies = [];
+      for(let m = mm+1; m <= 12; m++){
+        const maxD = new Date(yy, m, 0).getDate();
+        copies.push({ ...e, id: genId(), u: Date.now(),
+          date: `${yy}-${String(m).padStart(2,'0')}-${String(Math.min(dd,maxD)).padStart(2,'0')}`,
+          status: e.type==='Income' ? 'Incoming' : 'Due' });
+      }
+      S.tx.push(e, ...copies);
+      if(copies.length) extra = ` + ${copies.length} upcoming`;
+    } else {
+      S.tx.push(e);
+    }
+  } else {
+    const orig = S.tx.find(t=>sameId(t.id, e.id));
+    const members = orig ? seriesOf(orig) : [];
+    if(members.length > 1){
+      const sc = await askScope(`"${orig.desc}" repeats ${members.length} times. Apply changes to…`);
+      if(sc==='cancel') return;
+      if(sc==='all'){
+        // shared fields propagate; each occurrence keeps its own date and status
+        for(const t of members){
+          if(sameId(t.id, e.id)) continue;
+          Object.assign(t, { desc:e.desc, client:e.client, category:e.category,
+            currency:e.currency, amount:e.amount, rate:e.rate,
+            recurring:e.recurring, notes:e.notes, u:Date.now() });
+        }
+        extra = ` · all ${members.length}`;
+      }
+    }
+    const i = S.tx.findIndex(t=>sameId(t.id, e.id));
+    if(i>=0) S.tx[i] = e;
+  }
+
   if(e.type==='Income'){ LASTUSE.incomeCat = e.category; LASTUSE.incomeClient = e.client; }
   else LASTUSE.expenseCat = e.category;
   try{ localStorage.setItem('aoi-lastuse', JSON.stringify(LASTUSE)); }catch{}
   haptic(12);
   save(); closePanel(); render();
-  showToast(`${isNew?'Added':'Saved'} "${e.desc}" · ${php0(pesos(e))}`);
+  showToast(`${isNew?'Added':'Saved'} "${e.desc}" · ${php0(pesos(e))}${extra}`);
 }
 
 /* ============================== events ============================== */
 
 document.addEventListener('click', ev => {
+  const sc = ev.target.closest('[data-scope]');
+  if(sc || ev.target.id==='scopeask'){
+    $('#scopeask').hidden = true;
+    const r = scopeResolve; scopeResolve = null;
+    if(r) r(sc ? sc.dataset.scope : 'cancel');
+    return;
+  }
+
   const go = ev.target.closest('[data-go]');
   if(go){
     if(route === go.dataset.go){ window.scrollTo({ top:0, behavior:'smooth' }); return; }
@@ -2292,6 +2375,12 @@ document.addEventListener('touchend', () => {
   const { tr, dx, id, active } = sw; sw = null;
   if(!active) return;
   if(dx <= -(SW_COMMIT - 2)){
+    // recurring series: snap back and ask scope instead of sliding out
+    const t = S.tx.find(x=>sameId(x.id, id));
+    if(t && seriesOf(t).length > 1){
+      swTween(tr, dx, 0, 260, easeOutBack, () => { swCleanup(tr); deleteTx(id); });
+      return;
+    }
     // accelerate off-screen, collapse the row's height, then delete
     swTween(tr, dx, -(tr.offsetWidth + 24), 190, easeInQuad, () => {
       tr.style.height = tr.offsetHeight + 'px';
@@ -2378,6 +2467,18 @@ setInterval(syncRates, 30*60*1000);
 document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') cloudSync(); });
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js').catch(()=>{}); }
 setTimeout(()=>{ const sp = $('#splash'); if(sp){ sp.classList.add('done'); setTimeout(()=>sp.remove(), 600); } }, 700);
+
+/* weekly backup reminder: nudges once a day at most while overdue */
+{
+  const overdue = S.tx.length>0 && (!S.lastBackup || Date.now()-S.lastBackup > 7*864e5);
+  let lastNag = 0; try{ lastNag = +localStorage.getItem('aoi-lastnag') || 0; }catch{}
+  if(overdue && Date.now()-lastNag > 864e5 && !firstRun){
+    try{ localStorage.setItem('aoi-lastnag', String(Date.now())); }catch{}
+    setTimeout(()=> showToast(
+      S.lastBackup ? `Backup reminder · last export ${ageLabel(S.lastBackup)}` : 'Backup reminder · no export yet',
+      ()=>{ route = 'settings'; }, 'Open settings'), 2600);
+  }
+}
 window.addEventListener('resize', moveBlob);
 window.addEventListener('load', moveBlob);
 
