@@ -742,7 +742,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.7.1 · 2026-06-12';
+const APP_VERSION = '1.7.2 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -755,7 +755,7 @@ const DEFAULT_CATEGORIES = ['Salary','Retainer','Project','Other Income',
 function buildFresh(){
   return {
     v: 1, tx: [], nextId: 1, assets: [], savings: [],
-    assetDel: {}, saveDel: {},
+    assetDel: {}, saveDel: {}, catTomb: {}, cliTomb: {}, rateTomb: {},
     rates: { PHP:1, USD:RATES.USD, GBP:RATES.GBP },
     clients: ['N/A'],
     categories: [...DEFAULT_CATEGORIES],
@@ -818,6 +818,9 @@ function migrateState(){
   S.savings ||= [];
   S.assetDel ||= {};
   S.saveDel ||= {};
+  S.catTomb ||= {};
+  S.cliTomb ||= {};
+  S.rateTomb ||= {};
   (S.assets||[]).forEach(a=>{ if(!a.id) a.id = 'as_' + hashId(String(a.name).trim().toUpperCase()); });
   const seen = new Map();
   for(const a of S.assets){
@@ -1011,7 +1014,7 @@ async function deleteTx(id){
   haptic(16);
   save(); render();
   showToast(all ? `Deleted ${goneList.length} occurrences` : `Deleted "${target.desc}"`, ()=>{
-    goneList.forEach(t=>delete S.deleted[String(t.id)]);
+    goneList.forEach(t=>{ S.deleted[String(t.id)] = -Date.now(); });
     S.tx.push(...goneList); save();
   });
 }
@@ -1345,19 +1348,41 @@ async function rest(path, opts = {}){
 
 /* per-transaction merge: newest edit wins by id, deletions win via tombstones,
    non-transaction sections follow whichever device saved most recently */
+/* Tombstone convention, used by every deletable collection:
+   positive timestamp = deleted at that moment, negative = re-added at |ts|.
+   Maps merge by keeping the entry with the largest |ts|, so whichever
+   action happened LAST — delete or re-add — wins across all devices. */
+const mergeTomb = (a={}, b={}) => {
+  const o = { ...a };
+  for(const [k, v] of Object.entries(b)){
+    if(!(k in o) || Math.abs(v) > Math.abs(o[k])) o[k] = v;
+  }
+  return o;
+};
+const isDead = ts => typeof ts === 'number' && ts > 0;
+
 function mergeStates(local, remote){
   const newerIsRemote = (remote.metaU||0) > (local.metaU||0);
   const base = newerIsRemote ? remote : local;
   const other = newerIsRemote ? local : remote;
   const out = { ...base };
-  // union the list sections so a fresh device's defaults can never erase real data
-  out.clients = [...new Set([...(base.clients||[]), ...(other.clients||[])])];
-  out.categories = [...new Set([...(base.categories||[]), ...(other.categories||[])])];
+
+  // string lists (clients, categories, rates): union, then drop tombstoned keys
+  out.cliTomb = mergeTomb(local.cliTomb, remote.cliTomb);
+  out.catTomb = mergeTomb(local.catTomb, remote.catTomb);
+  out.rateTomb = mergeTomb(local.rateTomb, remote.rateTomb);
+  out.clients = [...new Set([...(base.clients||[]), ...(other.clients||[])])]
+    .filter(c => !isDead(out.cliTomb[c.toLowerCase()]));
+  out.categories = [...new Set([...(base.categories||[]), ...(other.categories||[])])]
+    .filter(c => !isDead(out.catTomb[c.toLowerCase()]));
   out.rates = { ...(other.rates||{}), ...(base.rates||{}) };
+  for(const k of Object.keys(out.rates)){
+    if(k !== 'PHP' && isDead(out.rateTomb[k])) delete out.rates[k];
+  }
+
   // assets & savings: id-keyed, newest edit wins, deletions stick via tombstones.
-  // Normalize BOTH sides first: data from older app versions has no ids, and
-  // an id-less remote USDT must collapse into the local id-bearing USDT,
-  // not sit beside it as a duplicate.
+  // Normalize BOTH sides first so id-less items from older app versions
+  // collapse into their id-bearing twins instead of duplicating.
   const normalizeItems = st => {
     (st.assets||[]).forEach(a=>{ if(!a.id) a.id = 'as_' + hashId(String(a.name).trim().toUpperCase()); });
     (st.savings||[]).forEach(s=>{ if(!s.id) s.id = 'sv_' + hashId(String(s.name||'').trim().toLowerCase() + '|' + (s.currency||'')); });
@@ -1373,23 +1398,25 @@ function mergeStates(local, remote){
     }
     for(const [id, ts] of Object.entries(tomb)){
       const it = m.get(id);
-      if(it && ts >= (it.u||0)) m.delete(id);
+      if(it && isDead(ts) && ts >= (it.u||0)) m.delete(id);
     }
     return [...m.values()];
   };
-  out.assetDel = { ...(other.assetDel||{}), ...(base.assetDel||{}) };
-  out.saveDel = { ...(other.saveDel||{}), ...(base.saveDel||{}) };
+  out.assetDel = mergeTomb(local.assetDel, remote.assetDel);
+  out.saveDel = mergeTomb(local.saveDel, remote.saveDel);
   out.assets = mergeItems(local.assets, remote.assets, out.assetDel);
   out.savings = mergeItems(local.savings, remote.savings, out.saveDel);
+
+  // transactions
   const map = new Map();
   for(const t of [...(local.tx||[]), ...(remote.tx||[])]){
     const k = String(t.id), cur = map.get(k);
     if(!cur || (t.u||0) > (cur.u||0)) map.set(k, t);
   }
-  const tomb = { ...(remote.deleted||{}), ...(local.deleted||{}) };
+  const tomb = mergeTomb(local.deleted, remote.deleted);
   for(const [id, ts] of Object.entries(tomb)){
     const t = map.get(id);
-    if(t && ts >= (t.u||0)) map.delete(id);
+    if(t && isDead(ts) && ts >= (t.u||0)) map.delete(id);
   }
   out.tx = [...map.values()];
   out.deleted = tomb;
@@ -2372,7 +2399,7 @@ document.addEventListener('click', ev => {
     (S.assetDel ||= {})[id] = Date.now();
     haptic(16);
     save(); render();
-    showToast(`Removed ${gone.name}`, ()=>{ delete S.assetDel[id]; gone.u = Date.now(); S.assets.push(gone); save(); });
+    showToast(`Removed ${gone.name}`, ()=>{ S.assetDel[id] = -Date.now(); gone.u = Date.now(); S.assets.push(gone); save(); });
     return; }
 
   const delSav = ev.target.closest('[data-del-sav]');
@@ -2384,11 +2411,11 @@ document.addEventListener('click', ev => {
     (S.saveDel ||= {})[id] = Date.now();
     haptic(16);
     save(); render();
-    showToast(`Removed ${gone.name}`, ()=>{ delete S.saveDel[id]; gone.u = Date.now(); S.savings.push(gone); save(); });
+    showToast(`Removed ${gone.name}`, ()=>{ S.saveDel[id] = -Date.now(); gone.u = Date.now(); S.savings.push(gone); save(); });
     return; }
 
   const delRate = ev.target.closest('[data-del-rate]');
-  if(delRate){ delete S.rates[delRate.dataset.delRate]; save(); render(); return; }
+  if(delRate){ const k = delRate.dataset.delRate; delete S.rates[k]; (S.rateTomb ||= {})[k] = Date.now(); save(); render(); return; }
   const frcDel = ev.target.closest('[data-frc-del]');
   if(frcDel){
     frClients.splice(+frcDel.dataset.frcDel, 1);
@@ -2398,9 +2425,9 @@ document.addEventListener('click', ev => {
   }
 
   const delClient = ev.target.closest('[data-del-client]');
-  if(delClient){ S.clients.splice(+delClient.dataset.delClient,1); save(); render(); return; }
+  if(delClient){ const [gone] = S.clients.splice(+delClient.dataset.delClient,1); if(gone) (S.cliTomb ||= {})[gone.toLowerCase()] = Date.now(); save(); render(); return; }
   const delCat = ev.target.closest('[data-del-cat]');
-  if(delCat){ S.categories.splice(+delCat.dataset.delCat,1); save(); render(); return; }
+  if(delCat){ const [gone] = S.categories.splice(+delCat.dataset.delCat,1); if(gone) (S.catTomb ||= {})[gone.toLowerCase()] = Date.now(); save(); render(); return; }
 
   const act = ev.target.closest('[data-act]')?.dataset.act;
   if(!act) return;
@@ -2490,7 +2517,7 @@ document.addEventListener('click', ev => {
       const id = 'as_' + hashId(name);
       const existing = S.assets.find(a=>String(a.id)===id);
       if(existing){ showToast(`${name} is already in your list`); break; }
-      delete (S.assetDel ||= {})[id]; // re-adding something previously deleted is intentional
+      (S.assetDel ||= {})[id] = -Date.now(); // re-adding something previously deleted is intentional
       const known = !!COIN_IDS[name];
       S.assets.push({ id, name, qty, rate: known ? 0 : 1, u: Date.now() });
       haptic(12);
@@ -2506,7 +2533,7 @@ document.addEventListener('click', ev => {
       if(!(amt>0)){ failField($('#sv-amt')); break; }
       if(!(cur in S.rates)){
         const live = liveFiatRate(cur);
-        if(live) S.rates[cur] = live;
+        if(live){ S.rates[cur] = live; (S.rateTomb ||= {})[cur] = -Date.now(); }
       }
       (S.savings ||= []).push({ id: 'sv' + genId(), name, currency: cur, amount: amt, u: Date.now() });
       haptic(12);
@@ -2516,14 +2543,14 @@ document.addEventListener('click', ev => {
     case 'add-cur': {
       const code = $('#new-cur').value.trim().toUpperCase();
       const rate = parseFloat($('#new-cur-rate').value);
-      if(code && rate>0 && !S.rates[code]){ S.rates[code]=rate; save(); render(); }
+      if(code && rate>0 && !S.rates[code]){ S.rates[code]=rate; (S.rateTomb ||= {})[code] = -Date.now(); save(); render(); }
       break; }
     case 'add-client': {
       const v = $('#new-client').value.trim();
-      if(v && !S.clients.includes(v)){ S.clients.push(v); save(); render(); } break; }
+      if(v && !S.clients.includes(v)){ S.clients.push(v); (S.cliTomb ||= {})[v.toLowerCase()] = -Date.now(); save(); render(); } break; }
     case 'add-cat': {
       const v = $('#new-cat').value.trim();
-      if(v && !S.categories.includes(v)){ S.categories.push(v); save(); render(); } break; }
+      if(v && !S.categories.includes(v)){ S.categories.push(v); (S.catTomb ||= {})[v.toLowerCase()] = -Date.now(); save(); render(); } break; }
     case 'export': {
       const blob = new Blob([JSON.stringify(S,null,2)], {type:'application/json'});
       const a = document.createElement('a');
@@ -2582,7 +2609,7 @@ document.addEventListener('change', ev => {
     const s = (S.savings||[]).find(x=>String(x.id)===t.dataset.sav);
     if(s){
       s.currency = t.value; s.u = Date.now();
-      if(!(t.value in S.rates)){ const live = liveFiatRate(t.value); if(live) S.rates[t.value] = live; }
+      if(!(t.value in S.rates)){ const live = liveFiatRate(t.value); if(live){ S.rates[t.value] = live; (S.rateTomb ||= {})[t.value] = -Date.now(); } }
       save(); render();
     }
     return;
@@ -2593,7 +2620,7 @@ document.addEventListener('change', ev => {
     let r = S.rates[editing.currency];
     if(r==null){
       const live = liveFiatRate(editing.currency);
-      if(live){ S.rates[editing.currency] = live; save(); r = live; } // remember it; future syncs keep it fresh
+      if(live){ S.rates[editing.currency] = live; (S.rateTomb ||= {})[editing.currency] = -Date.now(); save(); r = live; } // remember it; future syncs keep it fresh
     }
     editing.rate = r ?? 1;
     renderPanel();
