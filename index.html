@@ -361,6 +361,16 @@
   .del-x:hover{ background:var(--expense-tint); color:var(--expense); }
 
   .field{ margin-bottom:.9rem; }
+  .ac-wrap{ position:relative; }
+  #ac{ position:absolute; left:0; right:0; top:calc(100% + .3rem); z-index:10;
+       background:oklch(21% 0.008 230 / .98); border:1px solid var(--line); border-radius:10px;
+       box-shadow:0 14px 34px oklch(0% 0 0 / .5); max-height:13rem; overflow-y:auto; }
+  #ac[hidden]{ display:none; }
+  .ac-item{ padding:.55rem .75rem; cursor:pointer; display:flex; justify-content:space-between;
+            align-items:baseline; gap:.75rem; font-size:.8125rem; color:var(--ink); }
+  .ac-item + .ac-item{ border-top:1px solid var(--line-soft); }
+  .ac-item:hover{ background:var(--raised); }
+  .ac-item .m{ color:var(--faint); font-size:.71875rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .field label{ display:block; font-size:.71875rem; font-weight:550; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:.3rem; }
   .field input, .field select, .field textarea{ width:100%; }
   /* minmax(0,…) lets the native date input shrink instead of overflowing its column */
@@ -670,7 +680,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.2.3 · 2026-06-12';
+const APP_VERSION = '1.3.0 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -1800,7 +1810,7 @@ function renderPanel(){
       <div class="field"><label>Date</label><input type="date" id="e-date" value="${e.date}"></div>
       <div class="field"><label>Status</label><select id="e-status">${opts(statusChoices(e.type), e.status)}</select></div>
     </div>
-    <div class="field"><label>Description</label><input type="text" id="e-desc" value="${esc(e.desc)}" placeholder="e.g. Monthly retainer"></div>
+    <div class="field ac-wrap"><label>Description</label><input type="text" id="e-desc" value="${esc(e.desc)}" placeholder="e.g. Monthly retainer" autocomplete="off"><div id="ac" hidden></div></div>
     <div class="row2">
       <div class="field"><label>Client / source</label><select id="e-client">${opts(S.clients, e.client)}</select></div>
       <div class="field"><label>Category</label><select id="e-category">${opts(S.categories, e.category)}</select></div>
@@ -1847,6 +1857,40 @@ function pullPanel(){
   e.rate = e.currency==='PHP' ? 1 : (parseFloat($('#e-rate')?.value) || S.rates[e.currency] || 1);
   e.recurring = $('#e-recurring').checked;
   e.notes = $('#e-notes').value;
+}
+
+/* description autocomplete: surface past entries, prefill their details on pick */
+let acItems = [];
+function descSuggest(q){
+  const ac = $('#ac'); if(!ac) return;
+  q = q.trim().toLowerCase();
+  if(!q){ ac.hidden = true; return; }
+  const seen = new Map(); // most recent transaction per distinct description
+  for(const t of S.tx){
+    const k = t.desc.toLowerCase();
+    const cur = seen.get(k);
+    if(!cur || t.date > cur.date) seen.set(k, t);
+  }
+  const all = [...seen.values()];
+  const byDate = (a,b)=> b.date.localeCompare(a.date);
+  const starts = all.filter(t=>t.desc.toLowerCase().startsWith(q)).sort(byDate);
+  const contains = all.filter(t=>!t.desc.toLowerCase().startsWith(q) && t.desc.toLowerCase().includes(q)).sort(byDate);
+  acItems = [...starts, ...contains].slice(0,6);
+  if(!acItems.length || (acItems.length===1 && acItems[0].desc.toLowerCase()===q)){ ac.hidden = true; return; }
+  ac.innerHTML = acItems.map((t,i)=>
+    `<div class="ac-item" data-ac="${i}"><span>${esc(t.desc)}</span><span class="m">${esc(t.category)}${t.client && t.client!=='N/A' ? ' · '+esc(t.client) : ''}</span></div>`).join('');
+  ac.hidden = false;
+}
+function acPick(i){
+  const t = acItems[i]; if(!t || !editing) return;
+  pullPanel();
+  editing.desc = t.desc;
+  if(S.clients.includes(t.client)) editing.client = t.client;
+  if(S.categories.includes(t.category)) editing.category = t.category;
+  if(t.currency in S.rates){ editing.currency = t.currency; editing.rate = S.rates[t.currency] ?? t.rate; }
+  haptic(6);
+  renderPanel();
+  setTimeout(()=> $('#e-amount')?.focus(), 60);
 }
 
 function failField(el){
@@ -2026,6 +2070,7 @@ document.addEventListener('input', ev => {
     return;
   }
   if(t.dataset.rate){ const v = parseFloat(t.value); if(v>0){ S.rates[t.dataset.rate]=v; save(); } return; }
+  if(editing && t.id==='e-desc'){ descSuggest(t.value); return; }
   if(editing && (t.id==='e-amount' || t.id==='e-rate' || t.id==='e-currency')){
     const cur = $('#e-currency').value;
     const amt = parseFloat($('#e-amount').value)||0;
@@ -2069,9 +2114,22 @@ function refreshTxOnly(){
 }
 
 document.addEventListener('keydown', ev => {
-  if(ev.key==='Escape' && editing) closePanel();
+  if(ev.key==='Escape' && editing){
+    const ac = $('#ac');
+    if(ac && !ac.hidden){ ac.hidden = true; return; }
+    closePanel();
+  }
 });
 $('#backdrop').addEventListener('click', closePanel);
+
+/* autocomplete selection: pointerdown fires before the input's blur */
+document.addEventListener('pointerdown', ev => {
+  const item = ev.target.closest('[data-ac]');
+  if(item){ ev.preventDefault(); acPick(+item.dataset.ac); }
+});
+document.addEventListener('focusout', ev => {
+  if(ev.target.id==='e-desc') setTimeout(()=>{ const ac = $('#ac'); if(ac) ac.hidden = true; }, 150);
+});
 
 $('#importFile').addEventListener('change', ev => {
   const f = ev.target.files[0];
