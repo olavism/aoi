@@ -390,6 +390,14 @@
   .inv-table input{ width:9rem; text-align:right; }
   .inv-table input.aname{ text-align:left; width:8rem; }
 
+  /* distribution pies */
+  .pie-wrap{ display:flex; gap:1.4rem; align-items:center; margin:0 0 1.1rem; flex-wrap:wrap; }
+  .pie-legend{ display:flex; flex-direction:column; gap:.32rem; font-size:.78125rem; min-width:0; }
+  .pl-row{ display:flex; align-items:center; gap:.5rem; }
+  .pl-row i{ width:.55rem; height:.55rem; border-radius:2px; flex:none; }
+  .pl-name{ color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:10rem; }
+  .pl-val{ color:var(--muted); white-space:nowrap; }
+
   /* ---------- settings ---------- */
   .set-grid{ display:grid; grid-template-columns:1fr 1fr; gap:2.5rem 3rem; max-width:60rem; }
   .tags{ display:flex; flex-wrap:wrap; gap:.4rem; margin-bottom:.6rem; }
@@ -672,8 +680,18 @@
     <div class="s-mark">aoi<i></i></div>
     <p class="fr-tag">A private, multi-currency cashflow ledger.<br>Everything stays on this device.</p>
     <button class="btn primary fr-btn" data-act="fr-fresh">Start fresh</button>
+    <button class="btn fr-btn" data-act="fr-sync">Sign in & sync my data</button>
     <button class="btn fr-btn" data-act="fr-sample">Explore with sample data</button>
     <button class="btn fr-btn" data-act="fr-import">Restore a backup</button>
+  </div>
+  <div class="fr-inner" id="fr-sync" hidden>
+    <div class="s-mark" style="font-size:1.6rem">aoi<i style="width:.34rem;height:.34rem"></i></div>
+    <p class="fr-tag" style="margin-bottom:.4rem"><b style="color:var(--ink)">Welcome back.</b><br>
+      Sign in with the same email and passphrase you used on your other device, and your ledger appears here.</p>
+    <div class="addrow" style="width:100%; margin-bottom:.5rem"><input id="frs-email" type="email" inputmode="email" autocomplete="email" placeholder="you@email.com"></div>
+    <div class="addrow" style="width:100%; margin-bottom:.5rem"><input id="frs-pass" type="password" autocomplete="current-password" placeholder="Sync passphrase"></div>
+    <button class="btn primary fr-btn" data-act="fr-sync-go">Sync my data</button>
+    <button class="btn fr-btn" data-act="fr-sync-back">Back</button>
   </div>
   <div class="fr-inner" id="fr-clients" hidden>
     <div class="s-mark" style="font-size:1.6rem">aoi<i style="width:.34rem;height:.34rem"></i></div>
@@ -724,7 +742,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.6.0 · 2026-06-12';
+const APP_VERSION = '1.7.0 · 2026-06-12';
 
 /* ============================== starting data ============================== */
 
@@ -736,7 +754,8 @@ const DEFAULT_CATEGORIES = ['Salary','Retainer','Project','Other Income',
 
 function buildFresh(){
   return {
-    v: 1, tx: [], nextId: 1, assets: [],
+    v: 1, tx: [], nextId: 1, assets: [], savings: [],
+    assetDel: {}, saveDel: {},
     rates: { PHP:1, USD:RATES.USD, GBP:RATES.GBP },
     clients: ['N/A'],
     categories: [...DEFAULT_CATEGORIES],
@@ -773,6 +792,10 @@ function buildSample(){
     rate:RATES[r[6]] ?? 1, recurring:!!r[8], notes:'' }));
   s.nextId = id;
   s.assets = [ { name:'USDT', qty:500, rate:RATES.USDT }, { name:'BTC', qty:0.004, rate:3800000 } ];
+  s.savings = [
+    { id:'sv_demo1', name:'Emergency fund', currency:'PHP', amount:85000, u:1 },
+    { id:'sv_demo2', name:'Travel stash', currency:'USD', amount:600, u:1 },
+  ];
   s.rates.USDT = RATES.USDT;
   return s;
 }
@@ -787,6 +810,24 @@ try {
   if(raw) S = JSON.parse(raw);
 } catch {}
 if(!S){ S = buildFresh(); firstRun = true; }
+
+/* migrate: savings list, stable asset ids, and tombstone maps.
+   Deterministic ids (hash of the name) make every device agree on identity,
+   which both deduplicates legacy duplicates and lets deletions stick. */
+function migrateState(){
+  S.savings ||= [];
+  S.assetDel ||= {};
+  S.saveDel ||= {};
+  (S.assets||[]).forEach(a=>{ if(!a.id) a.id = 'as_' + hashId(String(a.name).trim().toUpperCase()); });
+  const seen = new Map();
+  for(const a of S.assets){
+    const cur = seen.get(a.id);
+    if(!cur || (cur.qty===0 && a.qty>0)) seen.set(a.id, a);
+  }
+  if(seen.size !== S.assets.length) S.assets = [...seen.values()];
+}
+migrateState();
+
 function persist(){ try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch{} }
 function save(){ S.metaU = Date.now(); persist(); scheduleCloudPush(); }
 
@@ -798,7 +839,8 @@ function hashId(s){ let h = 5381; for(let i=0;i<s.length;i++) h = ((h<<5)+h+s.ch
 /* swap in a new dataset (first-run choice or backup restore) and re-derive scope */
 function adoptState(newS, msg){
   S = newS; firstRun = false;
-  if(!S.nextId) S.nextId = S.tx.reduce((a,t)=>Math.max(a,t.id),0)+1;
+  if(!S.nextId) S.nextId = S.tx.reduce((a,t)=>Math.max(a, typeof t.id==='number'?t.id:0),0)+1;
+  migrateState();
   save();
   $('#firstrun')?.remove();
   const ys = yearsList(), cy = String(new Date().getFullYear());
@@ -1311,9 +1353,25 @@ function mergeStates(local, remote){
   // union the list sections so a fresh device's defaults can never erase real data
   out.clients = [...new Set([...(base.clients||[]), ...(other.clients||[])])];
   out.categories = [...new Set([...(base.categories||[]), ...(other.categories||[])])];
-  const assetNames = new Set((base.assets||[]).map(a=>String(a.name).toUpperCase()));
-  out.assets = [...(base.assets||[]), ...(other.assets||[]).filter(a=>!assetNames.has(String(a.name).toUpperCase()))];
   out.rates = { ...(other.rates||{}), ...(base.rates||{}) };
+  // assets & savings: id-keyed, newest edit wins, deletions stick via tombstones
+  const mergeItems = (a=[], b=[], tomb={}) => {
+    const m = new Map();
+    for(const it of [...a, ...b]){
+      const k = String(it.id || it.name);
+      const cur = m.get(k);
+      if(!cur || (it.u||0) > (cur.u||0)) m.set(k, it);
+    }
+    for(const [id, ts] of Object.entries(tomb)){
+      const it = m.get(id);
+      if(it && ts >= (it.u||0)) m.delete(id);
+    }
+    return [...m.values()];
+  };
+  out.assetDel = { ...(other.assetDel||{}), ...(base.assetDel||{}) };
+  out.saveDel = { ...(other.saveDel||{}), ...(base.saveDel||{}) };
+  out.assets = mergeItems(local.assets, remote.assets, out.assetDel);
+  out.savings = mergeItems(local.savings, remote.savings, out.saveDel);
   const map = new Map();
   for(const t of [...(local.tx||[]), ...(remote.tx||[])]){
     const k = String(t.id), cur = map.get(k);
@@ -1608,11 +1666,11 @@ function viewOverview(){
           <tr><td>${m.full}</td>
               <td class="r">${php0(m.received)}</td>
               <td class="r">${m.incoming? php0(m.incoming) : '<span style="color:var(--faint)">—</span>'}</td>
-              <td class="r">${php0(m.expenses)}</td>
+              <td class="r neg">${php0(m.expenses)}</td>
               <td class="r ${net>=0?'pos':'neg'}">${php0(net)}</td></tr>`; }).join('')}
           <tr class="total"><td>Total</td>
               <td class="r">${php0(T.received)}</td><td class="r">${php0(T.incoming)}</td>
-              <td class="r">${php0(T.expenses)}</td><td class="r ${T.income-T.expenses>=0?'pos':'neg'}">${php0(T.income-T.expenses)}</td></tr>
+              <td class="r neg">${php0(T.expenses)}</td><td class="r ${T.income-T.expenses>=0?'pos':'neg'}">${php0(T.income-T.expenses)}</td></tr>
         </tbody>
       </table>
       </div>
@@ -1826,45 +1884,109 @@ function viewTx(){
 
 /* ---------- investments ---------- */
 
-function viewInvest(){
-  const total = S.assets.reduce((a,x)=>a + x.qty*x.rate, 0);
-  const intro = `<p class="sub" style="max-width:46rem; margin:-.75rem 0 1.25rem">This is your investments corner: track the crypto, stocks, and gold you hold,
-    and watch their peso value move with the market. Supported assets revalue automatically on every rate sync.</p>`;
-  if(!S.assets.length) return `
-  <div class="inv-total num"><span class="sub">Portfolio value</span>₱0</div>
-  ${intro}
-  <div class="empty-hero" style="max-width:46rem">
-    <p>No assets tracked yet. Add crypto, gold, or anything else you hold; BTC, ETH, USDT, and XAU revalue automatically.</p>
-    <button class="btn primary" data-act="add-asset">Add an asset</button>
+const PIE_COLORS = ['var(--income)','var(--accent)','var(--pending)','var(--expense)',
+  'oklch(72% 0.16 300)','oklch(78% 0.14 55)','oklch(68% 0.12 250)','oklch(82% 0.1 20)'];
+
+function pieBlock(items){
+  const total = items.reduce((a,x)=>a + x.value, 0);
+  if(!total) return '';
+  const r = 40, C = 2*Math.PI*r;
+  let off = 0, segs = '';
+  items.forEach((x,i)=>{
+    const f = x.value/total;
+    segs += `<circle r="${r}" cx="60" cy="60" fill="none" stroke="${PIE_COLORS[i%PIE_COLORS.length]}" stroke-width="17"
+      stroke-dasharray="${Math.max(0.5, f*C - 1.5).toFixed(2)} ${C.toFixed(2)}"
+      stroke-dashoffset="${(-off*C).toFixed(2)}" transform="rotate(-90 60 60)"/>`;
+    off += f;
+  });
+  return `<div class="pie-wrap">
+    <svg viewBox="0 0 120 120" width="116" height="116" role="img" aria-label="Distribution">${segs}</svg>
+    <div class="pie-legend num">${items.map((x,i)=>`
+      <div class="pl-row"><i style="background:${PIE_COLORS[i%PIE_COLORS.length]}"></i>
+        <span class="pl-name">${esc(x.label)}</span>
+        <span class="pl-val">${php0(x.value)} · ${Math.round(x.value/total*100)}%</span></div>`).join('')}
+    </div>
   </div>`;
-  return `
-  <div class="inv-total num"><span class="sub">Portfolio value</span>${php0(total)}</div>
-  ${intro}
-  <div class="scroll-x">
-  <table class="inv-table num" style="max-width:46rem">
-    <thead><tr><th>Asset</th><th class="r">Quantity</th><th class="r">Rate → PHP</th><th class="r">Value (PHP)</th><th></th></tr></thead>
-    <tbody>
-      ${S.assets.map((a,i)=>{
-        const auto = !!COIN_IDS[String(a.name||'').trim().toUpperCase()];
-        return `
+}
+
+const savRate = c => c==='PHP' ? 1 : (S.rates[c] ?? liveFiatRate(c) ?? 1);
+
+function viewInvest(){
+  const totalI = S.assets.reduce((a,x)=>a + x.qty*x.rate, 0);
+  const totalS = (S.savings||[]).reduce((a,s)=>a + s.amount*savRate(s.currency), 0);
+  const curOpts = [...new Set([...Object.keys(S.rates), ...COMMON_CURRENCIES])];
+
+  const assetRows = S.assets.map(a=>{
+    const auto = !!COIN_IDS[String(a.name||'').trim().toUpperCase()];
+    return `
       <tr>
-        <td><input class="aname" data-asset="${i}" data-k="name" value="${esc(a.name)}">
-            ${auto ? '' : '<div class="meta" style="margin-top:.25rem;color:var(--pending)">no auto-sync · set rate manually</div>'}</td>
-        <td class="r"><input type="number" step="any" inputmode="decimal" data-asset="${i}" data-k="qty" value="${a.qty}"></td>
-        <td class="r"><input type="number" step="any" inputmode="decimal" data-asset="${i}" data-k="rate" value="${a.rate}"></td>
+        <td><b>${esc(a.name)}</b>${auto ? '' : '<div class="meta" style="color:var(--pending)">manual rate</div>'}</td>
+        <td class="r"><input type="number" step="any" inputmode="decimal" data-aid="${a.id}" data-k="qty" value="${a.qty}"></td>
+        <td class="r"><input type="number" step="any" inputmode="decimal" data-aid="${a.id}" data-k="rate" value="${a.rate}" ${auto?'disabled title="Auto-synced from market rates"':''}></td>
         <td class="r" style="font-weight:570">${php0(a.qty*a.rate)}</td>
-        <td class="r"><button class="x del-x" data-del-asset="${i}" title="Delete ${esc(a.name)}" aria-label="Delete ${esc(a.name)}">×</button></td>
-      </tr>`;}).join('')}
-      <tr class="total"><td>Total</td><td></td><td></td><td class="r">${php0(total)}</td><td></td></tr>
-    </tbody>
-  </table>
-  </div>
-  <p style="margin-top:1.25rem; display:flex; gap:.6rem; align-items:center; flex-wrap:wrap">
-    <button class="btn" data-act="add-asset">Add asset</button>
+        <td class="r"><button class="x del-x" data-del-asset="${a.id}" aria-label="Delete ${esc(a.name)}">×</button></td>
+      </tr>`;
+  }).join('');
+
+  const savRows = (S.savings||[]).map(s=>`
+      <tr>
+        <td><input class="aname" data-sav="${s.id}" data-k="name" value="${esc(s.name)}"></td>
+        <td><select data-sav="${s.id}" data-k="currency">${opts(curOpts, s.currency)}</select></td>
+        <td class="r"><input type="number" step="any" inputmode="decimal" data-sav="${s.id}" data-k="amount" value="${s.amount}"></td>
+        <td class="r" style="font-weight:570">${php0(s.amount*savRate(s.currency))}</td>
+        <td class="r"><button class="x del-x" data-del-sav="${s.id}" aria-label="Delete ${esc(s.name)}">×</button></td>
+      </tr>`).join('');
+
+  return `
+  <div class="inv-total num"><span class="sub">Investments & savings</span>${php0(totalI + totalS)}</div>
+  <p class="sub" style="max-width:46rem; margin:-.75rem 0 1.5rem">Your wealth corner: crypto, stocks, and gold on one side, cash savings on the other.
+    Market-listed assets revalue automatically on every rate sync.</p>
+
+  <section style="max-width:46rem; margin-bottom:2.5rem">
+    <h2>Investments <span class="sub num" style="font-weight:450">· ${php0(totalI)}</span></h2>
+    ${pieBlock(S.assets.filter(a=>a.qty*a.rate>0).map(a=>({label:a.name, value:a.qty*a.rate})))}
+    ${S.assets.length ? `
+    <div class="scroll-x">
+    <table class="inv-table num">
+      <thead><tr><th>Asset</th><th class="r">Quantity</th><th class="r">Rate → PHP</th><th class="r">Value (PHP)</th><th></th></tr></thead>
+      <tbody>${assetRows}</tbody>
+    </table>
+    </div>` : `<p class="sub">No assets yet. Pick one below to start.</p>`}
+    <div class="addrow" style="margin-top:.8rem">
+      <select id="na-sym">
+        ${Object.keys(COIN_IDS).map(c=>`<option>${c}</option>`).join('')}
+        <option value="custom">Custom…</option>
+      </select>
+      <input id="na-name" placeholder="Asset code" style="display:none; text-transform:uppercase" maxlength="10">
+      <input id="na-qty" type="number" step="any" inputmode="decimal" placeholder="Quantity">
+      <button class="btn" data-act="asset-add">Add</button>
+    </div>
+    <p class="sub" style="margin-top:.6rem">BTC, ETH, USDT, SOL, BNB, XRP, ADA, DOGE, and XAU (gold) auto-sync from CoinGecko.
+      Custom assets keep the rate you type.</p>
+  </section>
+
+  <section style="max-width:46rem">
+    <h2>Savings <span class="sub num" style="font-weight:450">· ${php0(totalS)}</span></h2>
+    ${pieBlock((S.savings||[]).filter(s=>s.amount>0).map(s=>({label:s.name, value:s.amount*savRate(s.currency)})))}
+    ${(S.savings||[]).length ? `
+    <div class="scroll-x">
+    <table class="inv-table num">
+      <thead><tr><th>Savings</th><th>Currency</th><th class="r">Amount</th><th class="r">Value (PHP)</th><th></th></tr></thead>
+      <tbody>${savRows}</tbody>
+    </table>
+    </div>` : `<p class="sub">No savings tracked yet. Emergency fund, travel stash, time deposit: name it and watch it grow.</p>`}
+    <div class="addrow" style="margin-top:.8rem">
+      <input id="sv-name" placeholder="e.g. Emergency fund">
+      <select id="sv-cur">${opts(curOpts, 'PHP')}</select>
+      <input id="sv-amt" type="number" step="any" inputmode="decimal" placeholder="Amount">
+      <button class="btn" data-act="sav-add">Add</button>
+    </div>
+  </section>
+
+  <p style="margin-top:1.5rem; display:flex; gap:.6rem; align-items:center; flex-wrap:wrap">
     <button class="btn" data-act="sync">Sync rates</button>
     <span class="sub" id="sync-msg">${syncLabelHTML()}</span>
-  </p>
-  <p class="sub" style="max-width:46rem">Rates are PHP per one unit. These codes auto-sync from CoinGecko: BTC, ETH, USDT, SOL, BNB, XRP, ADA, DOGE, and XAU (gold, via PAX Gold). Anything else keeps the rate you type until you update it.</p>`;
+  </p>`;
 }
 
 /* ---------- settings ---------- */
@@ -2234,10 +2356,26 @@ document.addEventListener('click', ev => {
 
   const delAsset = ev.target.closest('[data-del-asset]');
   if(delAsset){
-    const i = +delAsset.dataset.delAsset;
-    const [gone] = S.assets.splice(i,1);
+    const id = delAsset.dataset.delAsset;
+    const gone = S.assets.find(a=>String(a.id)===id);
+    if(!gone) return;
+    S.assets = S.assets.filter(a=>String(a.id)!==id);
+    (S.assetDel ||= {})[id] = Date.now();
+    haptic(16);
     save(); render();
-    showToast(`Removed ${gone.name}`, ()=>{ S.assets.splice(Math.min(i,S.assets.length),0,gone); save(); });
+    showToast(`Removed ${gone.name}`, ()=>{ delete S.assetDel[id]; gone.u = Date.now(); S.assets.push(gone); save(); });
+    return; }
+
+  const delSav = ev.target.closest('[data-del-sav]');
+  if(delSav){
+    const id = delSav.dataset.delSav;
+    const gone = (S.savings||[]).find(s=>String(s.id)===id);
+    if(!gone) return;
+    S.savings = S.savings.filter(s=>String(s.id)!==id);
+    (S.saveDel ||= {})[id] = Date.now();
+    haptic(16);
+    save(); render();
+    showToast(`Removed ${gone.name}`, ()=>{ delete S.saveDel[id]; gone.u = Date.now(); S.savings.push(gone); save(); });
     return; }
 
   const delRate = ev.target.closest('[data-del-rate]');
@@ -2299,6 +2437,24 @@ document.addEventListener('click', ev => {
     case 'fr-cl-skip':
       adoptState(buildFresh(), 'Fresh start. Add your first transaction!');
       break;
+    case 'fr-sync':
+      $('#fr-choice').hidden = true;
+      $('#fr-sync').hidden = false;
+      setTimeout(()=> $('#frs-email')?.focus(), 150);
+      break;
+    case 'fr-sync-back':
+      $('#fr-sync').hidden = true;
+      $('#fr-choice').hidden = false;
+      break;
+    case 'fr-sync-go': {
+      const em = $('#frs-email')?.value.trim(), pass = $('#frs-pass')?.value || '';
+      if(!em || !em.includes('@')){ failField($('#frs-email')); break; }
+      if(pass.length < 6){ failField($('#frs-pass')); break; }
+      showToast('Connecting…');
+      syncSignIn(em, pass)
+        .then(()=> adoptState(S, `Synced · ${S.tx.length} transaction${S.tx.length===1?'':'s'}`))
+        .catch(err=>showToast(err.message));
+      break; }
     case 'fr-sample': adoptState(buildSample(), 'Sample data loaded. Explore freely!'); break;
     case 'fr-import': $('#importFile').click(); break;
     case 'add': openPanel(null); break;
@@ -2316,7 +2472,38 @@ document.addEventListener('click', ev => {
     case 'delete':
       if(editing?.id!=null){ const id = editing.id; closePanel(); deleteTx(id); }
       break;
-    case 'add-asset': S.assets.push({name:'NEW', qty:0, rate:1}); save(); render(); break;
+    case 'asset-add': {
+      const sym = $('#na-sym').value;
+      const name = (sym==='custom' ? $('#na-name').value.trim().toUpperCase() : sym);
+      const qty = parseFloat($('#na-qty').value) || 0;
+      if(!name){ failField($('#na-name')); break; }
+      if(!(qty>0)){ failField($('#na-qty')); break; }
+      const id = 'as_' + hashId(name);
+      const existing = S.assets.find(a=>String(a.id)===id);
+      if(existing){ showToast(`${name} is already in your list`); break; }
+      delete (S.assetDel ||= {})[id]; // re-adding something previously deleted is intentional
+      const known = !!COIN_IDS[name];
+      S.assets.push({ id, name, qty, rate: known ? 0 : 1, u: Date.now() });
+      haptic(12);
+      save(); render();
+      showToast(`Added ${name}`);
+      if(known) syncRates(); // pull its live price right away
+      break; }
+    case 'sav-add': {
+      const name = $('#sv-name').value.trim();
+      const cur = $('#sv-cur').value;
+      const amt = parseFloat($('#sv-amt').value) || 0;
+      if(!name){ failField($('#sv-name')); break; }
+      if(!(amt>0)){ failField($('#sv-amt')); break; }
+      if(!(cur in S.rates)){
+        const live = liveFiatRate(cur);
+        if(live) S.rates[cur] = live;
+      }
+      (S.savings ||= []).push({ id: 'sv' + genId(), name, currency: cur, amount: amt, u: Date.now() });
+      haptic(12);
+      save(); render();
+      showToast(`Added "${name}"`);
+      break; }
     case 'add-cur': {
       const code = $('#new-cur').value.trim().toUpperCase();
       const rate = parseFloat($('#new-cur-rate').value);
@@ -2347,11 +2534,18 @@ document.addEventListener('click', ev => {
 document.addEventListener('input', ev => {
   const t = ev.target;
   if(t.id==='f-q'){ F.q = t.value; refreshTxOnly(); return; }
-  if(t.dataset.asset !== undefined){
-    const a = S.assets[+t.dataset.asset];
-    if(t.dataset.k==='name') a.name = t.value;
-    else a[t.dataset.k] = parseFloat(t.value)||0;
-    save();
+  if(t.dataset.aid !== undefined){
+    const a = S.assets.find(x=>String(x.id)===t.dataset.aid);
+    if(a){ a[t.dataset.k] = parseFloat(t.value)||0; a.u = Date.now(); save(); }
+    return;
+  }
+  if(t.dataset.sav !== undefined){
+    const s = (S.savings||[]).find(x=>String(x.id)===t.dataset.sav);
+    if(s){
+      if(t.dataset.k==='name') s.name = t.value;
+      else if(t.dataset.k==='amount') s.amount = parseFloat(t.value)||0;
+      s.u = Date.now(); save();
+    }
     return;
   }
   if(t.dataset.rate){ const v = parseFloat(t.value); if(v>0){ S.rates[t.dataset.rate]=v; save(); } return; }
@@ -2374,7 +2568,17 @@ document.addEventListener('change', ev => {
     if(k in F){ F[k] = t.value; render(); }
     return;
   }
-  if(t.dataset.asset !== undefined){ render(); return; }
+  if(t.id==='na-sym'){ $('#na-name').style.display = t.value==='custom' ? '' : 'none'; return; }
+  if(t.dataset.sav !== undefined && t.dataset.k==='currency'){
+    const s = (S.savings||[]).find(x=>String(x.id)===t.dataset.sav);
+    if(s){
+      s.currency = t.value; s.u = Date.now();
+      if(!(t.value in S.rates)){ const live = liveFiatRate(t.value); if(live) S.rates[t.value] = live; }
+      save(); render();
+    }
+    return;
+  }
+  if(t.dataset.aid !== undefined || t.dataset.sav !== undefined){ render(); return; }
   if(editing && t.id==='e-currency'){
     pullPanel();
     let r = S.rates[editing.currency];
