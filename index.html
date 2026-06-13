@@ -226,7 +226,6 @@
   .seg.chart-toggle{ flex:none; border-radius:7px; }
   .seg.chart-toggle button{ flex:none; padding:.34rem .72rem; font-size:.6875rem; letter-spacing:.01em; }
   .chart-wrap svg{ display:block; width:100%; height:auto; }
-  .chart-wrap .net-area{ fill:var(--focus); opacity:.13; }
   .chart-wrap .bar-in{ fill:var(--income); filter:drop-shadow(0 0 4px var(--income-glow)); }
   .chart-wrap .bar-pn{ fill:var(--pending); }
   .chart-wrap .bar-ex{ fill:var(--expense); filter:drop-shadow(0 0 4px var(--expense-glow)); }
@@ -1922,6 +1921,9 @@ function chartSVG(months, view){
     <pattern id="dotgrid" width="7" height="7" patternUnits="userSpaceOnUse">
       <circle cx="2" cy="2" r="1.1" fill="var(--income)" opacity=".45"/>
     </pattern>
+    <pattern id="dotgrid-net" width="7" height="7" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.1" fill="var(--accent)" opacity=".45"/>
+    </pattern>
     <filter id="bloom" x="-30%" y="-30%" width="160%" height="160%">
       <feGaussianBlur stdDeviation="7"/>
     </filter>
@@ -1930,9 +1932,7 @@ function chartSVG(months, view){
 
   const series = `
     <g clip-path="url(#plot)">
-      ${aArea ? (net
-        ? `<path class="ar net-area" d="${aArea}" stroke="none"/>`
-        : `<path class="ar" d="${aArea}" fill="url(#dotgrid)" stroke="none"/>`) : ''}
+      ${aArea ? `<path class="ar" d="${aArea}" fill="url(#${net?'dotgrid-net':'dotgrid'})" stroke="none"/>` : ''}
       ${expPts.length>1 ? `<path class="lnglow" d="${expLine}" fill="none" stroke="var(--expense)" stroke-width="9" opacity=".3" filter="url(#bloom)"/>` : ''}
       ${aPts.length>1 ? `<path class="lnglow" d="${aLine}" fill="none" stroke="${aColor}" stroke-width="10" opacity=".4" filter="url(#bloom)"/>` : ''}
       ${expPts.length>1 ? `<path class="ln" pathLength="1" d="${expLine}" fill="none" stroke="var(--expense)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity=".85"/>` : ''}
