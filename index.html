@@ -203,6 +203,7 @@
     background:linear-gradient(180deg, var(--raised), var(--surface));
     overflow:hidden;
   }
+  .strip.has-ni{ grid-template-columns:repeat(7,1fr); }
   .strip > div{ padding:1rem 1.25rem 1.1rem; }
   .strip > div + div{ border-left:1px solid var(--line-soft); }
   .strip .lbl{ font-size:.6875rem; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:.4rem; }
@@ -378,8 +379,8 @@
   .row2{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:.75rem; }
   .field input[type=date]{ -webkit-appearance:none; appearance:none; min-width:0; min-height:2.3rem; }
   .seg{ display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--sunken); }
-  .seg button{ flex:1; font:inherit; border:0; background:none; color:var(--muted); padding:.45rem 0; cursor:pointer;
-               transition:background .15s ease-out, color .15s ease-out; }
+  .seg button{ flex:1; font:inherit; border:0; background:none; color:var(--muted); padding:.45rem .35rem; cursor:pointer;
+               white-space:nowrap; transition:background .15s ease-out, color .15s ease-out; }
   .seg button + button{ border-left:1px solid var(--line); }
   .seg button.on{ background:var(--accent-tint); color:var(--accent); font-weight:570; }
   .php-preview{ background:var(--sunken); border:1px solid var(--line-soft); border-radius:8px; padding:.6rem .8rem; font-size:.8125rem; color:var(--muted); display:flex; justify-content:space-between; }
@@ -555,6 +556,7 @@
   /* chart hover tooltip */
   .chart-wrap{ position:relative; }
   .chart-wrap [data-month]:hover{ fill:oklch(100% 0 0 / .05); }
+  .chart-wrap [data-month].sel{ fill:oklch(100% 0 0 / .08); }
   .chart-tip{
     position:absolute; z-index:5; pointer-events:none; min-width:10rem;
     padding:.55rem .75rem; border-radius:10px;
@@ -615,7 +617,7 @@
 
     #todayLbl{ display:none; }
 
-    .strip{ grid-template-columns:1fr 1fr; margin-bottom:1.6rem; }
+    .strip, .strip.has-ni{ grid-template-columns:1fr 1fr; margin-bottom:1.6rem; }
     .strip > div + div{ border-left:0; }
     .strip > div:nth-child(2n){ border-left:1px solid var(--line-soft); }
     .strip > div:nth-child(n+3){ border-top:1px solid var(--line-soft); }
@@ -784,7 +786,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.9 · 2026-06-13';
+const APP_VERSION = '2.0 · 2026-06-16';
 
 /* ============================== starting data ============================== */
 
@@ -792,7 +794,8 @@ const RATES = { PHP:1, USD:61.2520, GBP:82.0231, USDT:61.2520 };
 
 const DEFAULT_CATEGORIES = ['Salary','Retainer','Project','Other Income',
   'Food & Drinks','Transport','Utilities','Subscription','Shopping',
-  'Rent / Mortgage','Credit card','Other Expense'];
+  'Rent / Mortgage','Credit card','Other Expense',
+  'Reimbursement','Loan','Transfer'];
 
 function buildFresh(){
   return {
@@ -1013,6 +1016,9 @@ function seriesOf(t){
 }
 /* ---------- what's new ---------- */
 const CHANGELOG = [
+  { v:'2.0', d:'Jun 16, 2026', t:'Non-income & a tappable chart', pts:[
+    'New "Non-income" type for money in that isn\'t earnings — loans, reimbursements, transfers — green like income but kept out of your income, monthly income, and net totals',
+    'Tap any month on the cashflow chart to read its breakdown right there, instead of jumping to the ledger' ]},
   { v:'1.9', d:'Jun 13, 2026', t:'Net income on the chart', pts:[
     'The cashflow chart can now plot net income — what you actually kept — against expenses',
     'Toggle between Income and Net income views right above the chart' ]},
@@ -1084,8 +1090,8 @@ function askScope(title){
 function flipStatus(id){
   const t = S.tx.find(x=>sameId(x.id,id)); if(!t) return;
   const prev = t.status, prevU = t.u;
-  t.status = t.type==='Income' ? (t.status==='Received'?'Incoming':'Received')
-                               : (t.status==='Paid'?'Due':'Paid');
+  t.status = t.type==='Expense' ? (t.status==='Paid'?'Due':'Paid')
+                                : (t.status==='Received'?'Incoming':'Received');
   t.u = Date.now();
   haptic(12);
   save(); render();
@@ -1219,7 +1225,7 @@ function rollRecurring(){
       const nd = `${ny}-${String(nm).padStart(2,'0')}-${String(Math.min(d,maxD)).padStart(2,'0')}`;
       // deterministic id so every synced device generates the same occurrence once
       const rid = hashId(seriesKey + '|' + nd);
-      t = { ...t, id:rid, date:nd, status: t.type==='Income' ? 'Incoming' : 'Due', u:Date.now() };
+      t = { ...t, id:rid, date:nd, status: t.type==='Expense' ? 'Due' : 'Incoming', u:Date.now() };
       if(!existing.has(rid) && !(S.deleted && S.deleted[rid])){
         S.tx.push(t); existing.add(rid); changed = true;
       }
@@ -1229,11 +1235,12 @@ function rollRecurring(){
 }
 
 function totals(){
-  let received=0, incoming=0, paid=0, due=0;
+  let received=0, incoming=0, paid=0, due=0, niReceived=0, niIncoming=0;
   for(const t of S.tx){
     if(!inYear(t)) continue;
     const v = pesos(t);
     if(t.type==='Income'){ t.status==='Incoming' ? incoming+=v : received+=v; }
+    else if(t.type==='Non-income'){ t.status==='Incoming' ? niIncoming+=v : niReceived+=v; }
     else { t.status==='Due' ? due+=v : paid+=v; }
   }
   const invest = S.assets.reduce((a,x)=>a + x.qty*x.rate, 0);
@@ -1241,7 +1248,8 @@ function totals(){
   const wealth = invest + savings;
   const income = received + incoming;
   const expenses = paid + due;
-  return { received, incoming, paid, due, invest, savings, wealth, income, expenses,
+  const nonincome = niReceived + niIncoming;
+  return { received, incoming, paid, due, invest, savings, wealth, income, expenses, nonincome,
            grand: income + wealth, net: income + wealth - expenses };
 }
 
@@ -1254,7 +1262,8 @@ function byPeriod(){
     if(!map.has(key)) map.set(key, { key, received:0, incoming:0, expenses:0 });
     const m = map.get(key), v = pesos(t);
     if(t.type==='Income'){ t.status==='Incoming' ? m.incoming+=v : m.received+=v; }
-    else m.expenses += v;
+    else if(t.type==='Expense') m.expenses += v;
+    // Non-income is intentionally excluded from the cashflow chart and monthly buckets
   }
   return [...map.values()].sort((a,b)=> a.key.localeCompare(b.key)).map(m => ({
     ...m,
@@ -1770,13 +1779,14 @@ function viewOverview(){
       <button class="btn step" data-act="y-next" aria-label="Next year">›</button>
     </div>
   </div>
-  <div class="strip num">
+  <div class="strip num${T.nonincome>0?' has-ni':''}">
     <div><div class="lbl">Total income</div><div class="val" data-tick="${T.grand}" data-key="grand">${php0(T.grand)}</div><div class="note">incl. ${php0(T.wealth)} invest & savings</div></div>
     <div><div class="lbl">Total expenses</div><div class="val neg" data-tick="${T.expenses}" data-key="expenses">${php0(T.expenses)}</div><div class="note">${php0(T.due)} still due</div></div>
     <div><div class="lbl">Net</div><div class="val ${T.net>=0?'pos':'neg'}" data-tick="${T.net}" data-key="net">${php0(T.net)}</div><div class="note">total income − expenses</div></div>
     <div><div class="lbl">Incoming / pending</div><div class="val pend" data-tick="${T.incoming}" data-key="incoming">${php0(T.incoming)}</div><div class="note">not yet received</div></div>
     <div><div class="lbl">Invest & savings</div><div class="val" data-tick="${T.wealth}" data-key="invest">${php0(T.wealth)}</div><div class="note">${S.assets.filter(a=>a.qty>0).length} assets · ${(S.savings||[]).length} funds</div></div>
     <div><div class="lbl">Income this month</div><div class="val" data-tick="${mCur}" data-key="mincome">${php0(mCur)}</div><div class="note">${deltaNote}</div></div>
+    ${T.nonincome>0 ? `<div><div class="lbl">Non-income</div><div class="val pos" data-tick="${T.nonincome}" data-key="nonincome">${php0(T.nonincome)}</div><div class="note">not counted as income</div></div>` : ''}
   </div>
 
   <div class="ov-grid">
@@ -1825,7 +1835,7 @@ function viewOverview(){
           <span class="d">${humanDate(t.date)}</span>
           <span>${esc(t.desc)}</span>
           <span class="chip ${t.status.toLowerCase()}">${t.status}</span>
-          <span class="amt ${t.type==='Income'?'pos':'neg'}">${t.type==='Income'?'+':'−'}${php0(pesos(t))}</span>
+          <span class="amt ${t.type==='Expense'?'neg':'pos'}">${t.type==='Expense'?'−':'+'}${php0(pesos(t))}</span>
         </div>`).join('')}</div>`
       : `<div class="empty">Nothing due or incoming in the next month.</div>`}
     </section>
@@ -1968,7 +1978,7 @@ function opts(list, sel){ return list.map(o=>`<option ${o===sel?'selected':''}>$
 function viewTx(){
   const rows = txFiltered();
   const monthsAvail = monthList();
-  const sumIn = rows.filter(t=>t.type==='Income').reduce((a,t)=>a+pesos(t),0);
+  const sumIn = rows.filter(t=>t.type!=='Expense').reduce((a,t)=>a+pesos(t),0);
   const sumOut = rows.filter(t=>t.type==='Expense').reduce((a,t)=>a+pesos(t),0);
 
   const chips = [];
@@ -1985,18 +1995,18 @@ function viewTx(){
     const head = g!==lastGroup ? `<tr class="ghead"><td colspan="7">${g}</td></tr>` : '';
     lastGroup = g;
     const revert = t.status==='Received' || t.status==='Paid';
-    const action = t.type==='Income' ? (revert ? '↺ Incoming' : '✓ Received')
-                                     : (revert ? '↺ Due' : '✓ Paid');
+    const action = t.type==='Expense' ? (revert ? '↺ Due' : '✓ Paid')
+                                      : (revert ? '↺ Incoming' : '✓ Received');
     return head + `
       <tr data-edit="${t.id}" data-action="${action}"${revert?' data-revert':''} class="${selected.has(String(t.id))?'selected':''}" title="${selectMode?'Tap to select':'Tap to edit'}">
         <td style="white-space:nowrap" title="${t.date}">${humanDate(t.date)}</td>
         <td><span class="desc">${esc(t.desc)}</span>${t.recurring?'<span class="rec" title="Recurring">↻</span>':''}${t.notes?`<div class="meta">${esc(t.notes)}</div>`:''}</td>
         <td>${t.client==='N/A'?'<span style="color:var(--faint)">—</span>':esc(t.client)}</td>
         <td>${esc(t.category)}</td>
-        <td><span class="chip ${t.status.toLowerCase()}" data-flip="${t.id}" title="Tap to mark ${t.type==='Income' ? (t.status==='Received'?'incoming':'received') : (t.status==='Paid'?'due':'paid')}">${t.status}</span></td>
+        <td><span class="chip ${t.status.toLowerCase()}" data-flip="${t.id}" title="Tap to mark ${t.type==='Expense' ? (t.status==='Paid'?'due':'paid') : (t.status==='Received'?'incoming':'received')}">${t.status}</span></td>
         <td class="r ${t.currency==='PHP'?'php-same':''}">${t.currency==='PHP' ? php2(t.amount) : fmt2.format(t.amount)+' '+esc(t.currency)}
             ${t.currency!=='PHP'?`<span class="fx">@ ${fmt2.format(t.rate)}</span>`:''}</td>
-        <td class="r ${t.type==='Income'?'pos':'neg'}" style="font-weight:570">${t.type==='Income'?'+':'−'}${php2(pesos(t))}</td>
+        <td class="r ${t.type==='Expense'?'neg':'pos'}" style="font-weight:570">${t.type==='Expense'?'−':'+'}${php2(pesos(t))}</td>
       </tr>`;
   }).join('');
 
@@ -2008,7 +2018,7 @@ function viewTx(){
       <select id="f-month"><option value="">All months</option>${monthsAvail.map(m=>`<option value="${m}" ${F.month===m?'selected':''}>${monthLabel(m)}</option>`).join('')}</select>
       <button class="btn step" data-act="m-next" aria-label="Next month">›</button>
     </div>
-    <select id="f-type"><option value="">All types</option>${opts(['Income','Expense'],F.type)}</select>
+    <select id="f-type"><option value="">All types</option>${opts(['Income','Expense','Non-income'],F.type)}</select>
     <select id="f-status"><option value="">All statuses</option>${opts(['Received','Incoming','Paid','Due'],F.status)}</select>
     <select id="f-category"><option value="">All categories</option>${opts(S.categories,F.category)}</select>
     <select id="f-client"><option value="">All clients</option>${opts(S.clients,F.client)}</select>
@@ -2252,6 +2262,12 @@ function typeDefaults(type){
     category: (LASTUSE.expenseCat && S.categories.includes(LASTUSE.expenseCat)) ? LASTUSE.expenseCat
             : S.categories.find(c=>/food|expense|utilities|rent|shopping/i.test(c)) || S.categories[0] || ''
   };
+  if(type === 'Non-income') return {
+    client: (LASTUSE.niClient && S.clients.includes(LASTUSE.niClient)) ? LASTUSE.niClient
+          : (S.clients.includes('N/A') ? 'N/A' : (S.clients[0] || '')),
+    category: (LASTUSE.niCat && S.categories.includes(LASTUSE.niCat)) ? LASTUSE.niCat
+            : S.categories.find(c=>/loan|reimburse|transfer|refund|gift|non-?income|withdraw|savings/i.test(c)) || S.categories[0] || ''
+  };
   return {
     client: (LASTUSE.incomeClient && S.clients.includes(LASTUSE.incomeClient)) ? LASTUSE.incomeClient : (S.clients[0] || ''),
     category: (LASTUSE.incomeCat && S.categories.includes(LASTUSE.incomeCat)) ? LASTUSE.incomeCat
@@ -2279,13 +2295,13 @@ function closePanel(){
   $('#panel').classList.remove('show');
 }
 
-function statusChoices(type){ return type==='Income' ? ['Received','Incoming'] : ['Paid','Due']; }
+function statusChoices(type){ return type==='Expense' ? ['Paid','Due'] : ['Received','Incoming']; }
 
 function renderPanel(){
   const e = editing; if(!e) return;
   const isNew = e.id===null;
   $('#panel').classList.toggle('exp', e.type==='Expense');
-  $('#panel').classList.toggle('inc', e.type==='Income');
+  $('#panel').classList.toggle('inc', e.type!=='Expense'); // Income & Non-income share the green treatment
   $('#panel').innerHTML = `
   <div class="sheet-handle" aria-hidden="true"></div>
   <div class="p-head">
@@ -2297,6 +2313,7 @@ function renderPanel(){
       <div class="seg" id="e-type">
         <button class="${e.type==='Income'?'on':''}" data-type="Income">Income</button>
         <button class="${e.type==='Expense'?'on':''}" data-type="Expense">Expense</button>
+        <button class="${e.type==='Non-income'?'on':''}" data-type="Non-income">Non-income</button>
       </div>
     </div>
     <div class="row2">
@@ -2414,7 +2431,7 @@ async function saveTx(){
         const maxD = new Date(yy, m, 0).getDate();
         copies.push({ ...e, id: genId(), u: Date.now(),
           date: `${yy}-${String(m).padStart(2,'0')}-${String(Math.min(dd,maxD)).padStart(2,'0')}`,
-          status: e.type==='Income' ? 'Incoming' : 'Due' });
+          status: e.type==='Expense' ? 'Due' : 'Incoming' });
       }
       S.tx.push(e, ...copies);
       if(copies.length) extra = ` + ${copies.length} upcoming`;
@@ -2443,6 +2460,7 @@ async function saveTx(){
   }
 
   if(e.type==='Income'){ LASTUSE.incomeCat = e.category; LASTUSE.incomeClient = e.client; }
+  else if(e.type==='Non-income'){ LASTUSE.niCat = e.category; LASTUSE.niClient = e.client; }
   else LASTUSE.expenseCat = e.category;
   try{ localStorage.setItem('aoi-lastuse', JSON.stringify(LASTUSE)); }catch{}
   haptic(12);
@@ -2489,10 +2507,11 @@ document.addEventListener('click', ev => {
 
   const bar = ev.target.closest('[data-month]');
   if(bar){
-    const k = bar.dataset.month;
-    if(k.length===4){ YEAR = k; try{ localStorage.setItem('aoi-year', k); }catch{} F.month = ''; }
-    else F.month = k;
-    route = 'tx'; render(true); return;
+    // tapping a month highlights its breakdown on the chart rather than
+    // navigating away — works on touch where there's no hover
+    const wrap = bar.closest('.chart-wrap');
+    if(wrap) showChartTip(bar, wrap, ev.clientX, ev.clientY);
+    return;
   }
 
   if(ev.target.closest('#toast button')){
@@ -2582,8 +2601,8 @@ document.addEventListener('click', ev => {
     case 'bulk-all':
       txFiltered().forEach(t=>selected.add(String(t.id)));
       updateBulkUI(); render(); break;
-    case 'bulk-confirm': bulkApply(selected.size+' marked received / paid', t=>{ t.status = t.type==='Income'?'Received':'Paid'; }); break;
-    case 'bulk-pending': bulkApply(selected.size+' marked incoming / due', t=>{ t.status = t.type==='Income'?'Incoming':'Due'; }); break;
+    case 'bulk-confirm': bulkApply(selected.size+' marked received / paid', t=>{ t.status = t.type==='Expense'?'Paid':'Received'; }); break;
+    case 'bulk-pending': bulkApply(selected.size+' marked incoming / due', t=>{ t.status = t.type==='Expense'?'Due':'Incoming'; }); break;
     case 'bulk-delete': bulkDelete(); break;
     case 'sync-go': {
       const em = $('#sy-email')?.value.trim(), pass = $('#sy-pass')?.value || '';
@@ -3017,14 +3036,12 @@ setTimeout(()=>{ const sp = $('#splash'); if(sp){ sp.classList.add('done'); setT
 window.addEventListener('resize', moveBlob);
 window.addEventListener('load', moveBlob);
 
-/* chart hover readout: follow the cursor across the months */
-document.addEventListener('mousemove', ev => {
-  const hit = ev.target.closest?.('[data-month]');
-  const wrap = ev.target.closest?.('.chart-wrap');
-  document.querySelectorAll('.chart-tip').forEach(t => { if(!hit || t !== wrap?.querySelector('.chart-tip')) t.hidden = true; });
-  if(!hit || !wrap) return;
+/* chart readout: render a month's breakdown into its tooltip, positioned at (cx,cy) */
+function showChartTip(hit, wrap, cx, cy){
   const tip = wrap.querySelector('.chart-tip');
   if(!tip) return;
+  wrap.querySelectorAll('[data-month].sel').forEach(el => { if(el !== hit) el.classList.remove('sel'); });
+  hit.classList.add('sel');
   const rec = +hit.dataset.rec, inc = +hit.dataset.inc, exp = +hit.dataset.exp;
   tip.innerHTML = `<b>${hit.dataset.label}</b>
     <div class="row"><span><i style="background:var(--income)"></i>Received</span><span class="num">${php0(rec)}</span></div>
@@ -3033,11 +3050,31 @@ document.addEventListener('mousemove', ev => {
     <div class="row net"><span>Net</span><span class="num ${rec+inc-exp>=0?'pos':'neg'}">${php0(rec+inc-exp)}</span></div>`;
   tip.hidden = false;
   const r = wrap.getBoundingClientRect();
-  let x = ev.clientX - r.left + 16, y = ev.clientY - r.top - 12;
-  if(x + tip.offsetWidth > r.width - 6) x = ev.clientX - r.left - tip.offsetWidth - 16;
+  let x = cx - r.left + 16, y = cy - r.top - 12;
+  if(x + tip.offsetWidth > r.width - 6) x = cx - r.left - tip.offsetWidth - 16;
+  x = Math.max(4, x);
   y = Math.max(0, Math.min(y, r.height - tip.offsetHeight - 4));
   tip.style.left = x + 'px';
   tip.style.top = y + 'px';
+}
+
+/* desktop: follow the cursor across the months */
+document.addEventListener('mousemove', ev => {
+  const hit = ev.target.closest?.('[data-month]');
+  const wrap = ev.target.closest?.('.chart-wrap');
+  if(!hit || !wrap){
+    document.querySelectorAll('.chart-tip').forEach(t => t.hidden = true);
+    document.querySelectorAll('[data-month].sel').forEach(el => el.classList.remove('sel'));
+    return;
+  }
+  showChartTip(hit, wrap, ev.clientX, ev.clientY);
+});
+
+/* tapping anywhere off the chart clears a tapped-open readout */
+document.addEventListener('click', ev => {
+  if(ev.target.closest?.('.chart-wrap')) return;
+  document.querySelectorAll('.chart-tip').forEach(t => t.hidden = true);
+  document.querySelectorAll('[data-month].sel').forEach(el => el.classList.remove('sel'));
 });
 
 /* hide the floating nav while scrolling down, restore on scroll up */
