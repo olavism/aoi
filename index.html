@@ -780,7 +780,7 @@
 <script>
 'use strict';
 
-const APP_VERSION = '1.8.1 · 2026-06-12';
+const APP_VERSION = '1.9.0 · 2026-08-17';
 
 /* ============================== starting data ============================== */
 
@@ -793,7 +793,7 @@ const DEFAULT_CATEGORIES = ['Salary','Retainer','Project','Other Income',
 function buildFresh(){
   return {
     v: 1, tx: [], nextId: 1, assets: [], savings: [],
-    assetDel: {}, saveDel: {}, catTomb: {}, cliTomb: {}, rateTomb: {},
+    assetDel: {}, saveDel: {}, catTomb: {}, cliTomb: {}, rateTomb: {}, baseCur: 'PHP',
     rates: { PHP:1, USD:RATES.USD, GBP:RATES.GBP },
     clients: ['N/A'],
     categories: [...DEFAULT_CATEGORIES],
@@ -852,7 +852,18 @@ if(!S){ S = buildFresh(); firstRun = true; }
 /* migrate: savings list, stable asset ids, and tombstone maps.
    Deterministic ids (hash of the name) make every device agree on identity,
    which both deduplicates legacy duplicates and lets deletions stick. */
+function setBaseCur(c){
+  if(!CUR[c]) return;
+  S.baseCur = c;
+  // make sure the chosen currency has a PHP rate so conversions work at once
+  if(c!=='PHP' && !(c in S.rates)){ const live = liveFiatRate(c); if(live){ S.rates[c] = live; (S.rateTomb ||= {})[c] = -Date.now(); } }
+  haptic(10);
+  save(); render(true);
+  syncRates();
+}
+
 function migrateState(){
+  S.baseCur ||= 'PHP';
   S.savings ||= [];
   S.assetDel ||= {};
   S.saveDel ||= {};
@@ -924,9 +935,37 @@ function stepYear(dir){
 
 const fmt0 = new Intl.NumberFormat('en-PH', { maximumFractionDigits:0 });
 const fmt2 = new Intl.NumberFormat('en-PH', { minimumFractionDigits:2, maximumFractionDigits:2 });
-const php0 = n => (n<0?'-₱':'₱') + fmt0.format(Math.abs(Math.round(n)));
-const php2 = n => (n<0?'-₱':'₱') + fmt2.format(Math.abs(n));
-const pesos = t => t.amount * t.rate;
+
+/* base (display) currency. PHP stays the internal pivot: rates are PHP-per-unit
+   and money is stored in each transaction's own currency, so nothing is rescaled
+   when the base changes. Base only affects how values are valued & shown. */
+const CUR = {
+  PHP:{ s:'₱',  n:'Philippine peso' },      USD:{ s:'$',   n:'US dollar' },
+  EUR:{ s:'€',  n:'Euro' },                 GBP:{ s:'£',   n:'British pound' },
+  JPY:{ s:'¥',  n:'Japanese yen' },         AUD:{ s:'A$',  n:'Australian dollar' },
+  CAD:{ s:'C$', n:'Canadian dollar' },      SGD:{ s:'S$',  n:'Singapore dollar' },
+  HKD:{ s:'HK$',n:'Hong Kong dollar' },     AED:{ s:'AED ',n:'UAE dirham' },
+  INR:{ s:'₹',  n:'Indian rupee' },         CNY:{ s:'CN¥', n:'Chinese yuan' },
+  KRW:{ s:'₩',  n:'Korean won' },           IDR:{ s:'Rp',  n:'Indonesian rupiah' },
+  MYR:{ s:'RM', n:'Malaysian ringgit' },    THB:{ s:'฿',   n:'Thai baht' },
+  VND:{ s:'₫',  n:'Vietnamese dong' },      SAR:{ s:'SAR ',n:'Saudi riyal' },
+  NZD:{ s:'NZ$',n:'New Zealand dollar' },   CHF:{ s:'CHF ',n:'Swiss franc' },
+  TWD:{ s:'NT$',n:'Taiwan dollar' },
+};
+const BASE_CHOICES = Object.keys(CUR);
+function baseCur(){ return (S && S.baseCur) || 'PHP'; }
+function csym(){ return CUR[baseCur()]?.s || (baseCur()+' '); }
+// PHP per 1 unit of the base currency, so PHP-valued figures convert to base
+function baseRate(){ const b = baseCur(); return b==='PHP' ? 1 : (S.rates[b] || liveFiatRate(b) || 1); }
+
+const php0 = n => (n<0?'-':'') + csym() + fmt0.format(Math.abs(Math.round(n)));
+const php2 = n => (n<0?'-':'') + csym() + fmt2.format(Math.abs(n));
+
+// value of a transaction in the base currency; same-currency amounts stay exact
+const baseVal = t => { const a=+t.amount||0; return t.currency===baseCur() ? a : (a * (+t.rate||0)) / baseRate(); };
+const pesos = baseVal;
+const savBase = s => s.currency===baseCur() ? s.amount : (s.amount * savRate(s.currency)) / baseRate();
+const assetBase = a => (a.qty * a.rate) / baseRate();
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $ = sel => document.querySelector(sel);
 
@@ -998,6 +1037,10 @@ function seriesOf(t){
 }
 /* ---------- what's new ---------- */
 const CHANGELOG = [
+  { v:'1.9', d:'Aug 17, 2026', t:'Choose your currency', pts:[
+    'Set your main currency in Settings: dollars, euros, yen, pounds, and more',
+    'Everything shows in your currency; other currencies convert automatically',
+    'Amounts in your own currency stay exact, never distorted by conversion' ]},
   { v:'1.7', d:'Jun 12, 2026', t:'Investments & Savings', pts:[
     'Track crypto, gold, and cash savings side by side, with distribution charts',
     'Pick investments from a dropdown of auto-priced assets, or add your own',
@@ -1218,8 +1261,8 @@ function totals(){
     if(t.type==='Income'){ t.status==='Incoming' ? incoming+=v : received+=v; }
     else { t.status==='Due' ? due+=v : paid+=v; }
   }
-  const invest = S.assets.reduce((a,x)=>a + x.qty*x.rate, 0);
-  const savings = (S.savings||[]).reduce((a,s)=>a + s.amount*savRate(s.currency), 0);
+  const invest = S.assets.reduce((a,x)=>a + assetBase(x), 0);
+  const savings = (S.savings||[]).reduce((a,s)=>a + savBase(s), 0);
   const wealth = invest + savings;
   const income = received + incoming;
   const expenses = paid + due;
@@ -1726,12 +1769,12 @@ function viewOverview(){
 
   if(!S.tx.length) return `
   <div class="strip num">
-    <div><div class="lbl">Total income</div><div class="val">₱0</div><div class="note">nothing yet</div></div>
-    <div><div class="lbl">Total expenses</div><div class="val neg">₱0</div><div class="note">nothing yet</div></div>
-    <div><div class="lbl">Net</div><div class="val pos">₱0</div><div class="note">total income − expenses</div></div>
-    <div><div class="lbl">Incoming / pending</div><div class="val pend">₱0</div><div class="note">not yet received</div></div>
+    <div><div class="lbl">Total income</div><div class="val">${php0(0)}</div><div class="note">nothing yet</div></div>
+    <div><div class="lbl">Total expenses</div><div class="val neg">${php0(0)}</div><div class="note">nothing yet</div></div>
+    <div><div class="lbl">Net</div><div class="val pos">${php0(0)}</div><div class="note">total income − expenses</div></div>
+    <div><div class="lbl">Incoming / pending</div><div class="val pend">${php0(0)}</div><div class="note">not yet received</div></div>
     <div><div class="lbl">Invest & savings</div><div class="val">${php0(T.wealth)}</div><div class="note">${S.assets.length} assets · ${(S.savings||[]).length} funds</div></div>
-    <div><div class="lbl">Income this month</div><div class="val">₱0</div><div class="note">nothing yet</div></div>
+    <div><div class="lbl">Income this month</div><div class="val">${php0(0)}</div><div class="note">nothing yet</div></div>
   </div>
   <section class="wide">
     <div class="empty-hero">
@@ -1951,8 +1994,8 @@ function viewTx(){
         <td>${t.client==='N/A'?'<span style="color:var(--faint)">—</span>':esc(t.client)}</td>
         <td>${esc(t.category)}</td>
         <td><span class="chip ${t.status.toLowerCase()}" data-flip="${t.id}" title="Tap to mark ${t.type==='Income' ? (t.status==='Received'?'incoming':'received') : (t.status==='Paid'?'due':'paid')}">${t.status}</span></td>
-        <td class="r ${t.currency==='PHP'?'php-same':''}">${t.currency==='PHP' ? php2(t.amount) : fmt2.format(t.amount)+' '+esc(t.currency)}
-            ${t.currency!=='PHP'?`<span class="fx">@ ${fmt2.format(t.rate)}</span>`:''}</td>
+        <td class="r ${t.currency===baseCur()?'php-same':''}">${fmt2.format(t.amount)} ${esc(t.currency)}
+            ${t.currency!=='PHP' && t.currency!==baseCur()?`<span class="fx">@ ₱${fmt2.format(t.rate)}</span>`:''}</td>
         <td class="r ${t.type==='Income'?'pos':'neg'}" style="font-weight:570">${t.type==='Income'?'+':'−'}${php2(pesos(t))}</td>
       </tr>`;
   }).join('');
@@ -1988,7 +2031,7 @@ function viewTx(){
   <table class="tx-table num ${selectMode?'sel-on':''}">
     <thead><tr>
       <th>Date</th><th>Description</th><th>Client / source</th><th>Category</th>
-      <th>Status</th><th class="r">Amount</th><th class="r">PHP</th>
+      <th>Status</th><th class="r">Amount</th><th class="r">${esc(baseCur())}</th>
     </tr></thead>
     <tbody>
       ${rows.length ? bodyRows
@@ -2028,8 +2071,8 @@ function pieBlock(items){
 const savRate = c => c==='PHP' ? 1 : (S.rates[c] ?? liveFiatRate(c) ?? 1);
 
 function viewInvest(){
-  const totalI = S.assets.reduce((a,x)=>a + x.qty*x.rate, 0);
-  const totalS = (S.savings||[]).reduce((a,s)=>a + s.amount*savRate(s.currency), 0);
+  const totalI = S.assets.reduce((a,x)=>a + assetBase(x), 0);
+  const totalS = (S.savings||[]).reduce((a,s)=>a + savBase(s), 0);
   const curOpts = [...new Set([...Object.keys(S.rates), ...COMMON_CURRENCIES])];
 
   const assetRows = S.assets.map(a=>{
@@ -2039,7 +2082,7 @@ function viewInvest(){
         <td><b>${esc(a.name)}</b>${auto ? '' : '<div class="meta" style="color:var(--pending)">manual rate</div>'}</td>
         <td class="r"><input type="number" step="any" inputmode="decimal" data-aid="${a.id}" data-k="qty" value="${a.qty}"></td>
         <td class="r"><input type="number" step="any" inputmode="decimal" data-aid="${a.id}" data-k="rate" value="${a.rate}" ${auto?'disabled title="Auto-synced from market rates"':''}></td>
-        <td class="r" style="font-weight:570">${php0(a.qty*a.rate)}</td>
+        <td class="r" style="font-weight:570">${php0(assetBase(a))}</td>
         <td class="r"><button class="x del-x" data-del-asset="${a.id}" aria-label="Delete ${esc(a.name)}">×</button></td>
       </tr>`;
   }).join('');
@@ -2049,7 +2092,7 @@ function viewInvest(){
         <td><input class="aname" data-sav="${s.id}" data-k="name" value="${esc(s.name)}"></td>
         <td><select data-sav="${s.id}" data-k="currency">${opts(curOpts, s.currency)}</select></td>
         <td class="r"><input type="number" step="any" inputmode="decimal" data-sav="${s.id}" data-k="amount" value="${s.amount}"></td>
-        <td class="r" style="font-weight:570">${php0(s.amount*savRate(s.currency))}</td>
+        <td class="r" style="font-weight:570">${php0(savBase(s))}</td>
         <td class="r"><button class="x del-x" data-del-sav="${s.id}" aria-label="Delete ${esc(s.name)}">×</button></td>
       </tr>`).join('');
 
@@ -2060,11 +2103,11 @@ function viewInvest(){
 
   <section style="max-width:46rem; margin-bottom:2.5rem">
     <h2>Investments <span class="sub num" style="font-weight:450">· ${php0(totalI)}</span></h2>
-    ${pieBlock(S.assets.filter(a=>a.qty*a.rate>0).map(a=>({label:a.name, value:a.qty*a.rate})))}
+    ${pieBlock(S.assets.filter(a=>a.qty*a.rate>0).map(a=>({label:a.name, value:assetBase(a)})))}
     ${S.assets.length ? `
     <div class="scroll-x">
     <table class="inv-table num">
-      <thead><tr><th>Asset</th><th class="r">Quantity</th><th class="r">Rate → PHP</th><th class="r">Value (PHP)</th><th></th></tr></thead>
+      <thead><tr><th>Asset</th><th class="r">Quantity</th><th class="r">Rate → PHP</th><th class="r">Value</th><th></th></tr></thead>
       <tbody>${assetRows}</tbody>
     </table>
     </div>` : `<p class="sub">No assets yet. Pick one below to start.</p>`}
@@ -2083,11 +2126,11 @@ function viewInvest(){
 
   <section style="max-width:46rem">
     <h2>Savings <span class="sub num" style="font-weight:450">· ${php0(totalS)}</span></h2>
-    ${pieBlock((S.savings||[]).filter(s=>s.amount>0).map(s=>({label:s.name, value:s.amount*savRate(s.currency)})))}
+    ${pieBlock((S.savings||[]).filter(s=>s.amount>0).map(s=>({label:s.name, value:savBase(s)})))}
     ${(S.savings||[]).length ? `
     <div class="scroll-x">
     <table class="inv-table num">
-      <thead><tr><th>Savings</th><th>Currency</th><th class="r">Amount</th><th class="r">Value (PHP)</th><th></th></tr></thead>
+      <thead><tr><th>Savings</th><th>Currency</th><th class="r">Amount</th><th class="r">Value</th><th></th></tr></thead>
       <tbody>${savRows}</tbody>
     </table>
     </div>` : `<p class="sub">No savings tracked yet. Emergency fund, travel stash, time deposit: name it and watch it grow.</p>`}
@@ -2110,6 +2153,15 @@ function viewInvest(){
 function viewSettings(){
   return `
   <div class="set-grid">
+    <section>
+      <h2>Main currency</h2>
+      <p class="sub" style="margin:0 0 .75rem">Everything in the app is shown in this currency. Amounts you enter in other
+        currencies convert automatically using live rates.</p>
+      <select id="base-cur" style="max-width:24rem; width:100%">
+        ${BASE_CHOICES.map(c=>`<option value="${c}" ${baseCur()===c?'selected':''}>${CUR[c].s.trim()} · ${c} — ${CUR[c].n}</option>`).join('')}
+      </select>
+    </section>
+
     <section>
       <h2>Exchange rates</h2>
       <p class="sub" style="margin:0 0 .75rem">PHP per one unit, applied as the default when adding a transaction in that currency.
@@ -2275,13 +2327,13 @@ function renderPanel(){
       </div>
       <div class="field"><label>Amount</label><input type="number" step="any" inputmode="decimal" id="e-amount" value="${e.amount}" placeholder="0.00"></div>
     </div>
-    ${e.currency!=='PHP' ? `
+    ${(e.currency!=='PHP' && e.currency!==baseCur()) ? `
     <div class="field"><label>Rate → PHP</label><input type="number" step="any" inputmode="decimal" id="e-rate" value="${e.rate}">
       ${!(e.currency in S.rates) && !liveFiatRate(e.currency)
-        ? '<div class="meta" style="margin-top:.3rem;color:var(--pending)">No live rate found for this code — enter it manually.</div>' : ''}
+        ? '<div class="meta" style="margin-top:.3rem;color:var(--pending)">No live rate found for this code, enter it manually.</div>' : ''}
     </div>` : ''}
     <div class="field">
-      <div class="php-preview num"><span>Amount in PHP</span><b id="e-php">${php2((+e.amount||0) * (e.currency==='PHP'?1:+e.rate||0))}</b></div>
+      <div class="php-preview num"><span>Amount in ${esc(baseCur())}</span><b id="e-php">${php2(baseVal(e))}</b></div>
     </div>
     <div class="field"><label class="check" style="text-transform:none;letter-spacing:0;font-size:.8125rem">
       <input type="checkbox" id="e-recurring" ${e.recurring?'checked':''}> Recurring (repeats monthly)</label></div>
@@ -2694,13 +2746,14 @@ document.addEventListener('input', ev => {
     const cur = $('#e-currency').value;
     const amt = parseFloat($('#e-amount').value)||0;
     const rate = cur==='PHP' ? 1 : (parseFloat($('#e-rate')?.value) || S.rates[cur] || 1);
-    const out = $('#e-php'); if(out) out.textContent = php2(amt*rate);
+    const out = $('#e-php'); if(out) out.textContent = php2(baseVal({ currency:cur, amount:amt, rate }));
   }
 });
 
 document.addEventListener('change', ev => {
   const t = ev.target;
   if(t.id==='g-year'){ setYear(t.value); return; }
+  if(t.id==='base-cur'){ setBaseCur(t.value); return; }
   if(t.id==='bb-cat' && t.value){ const v=t.value; bulkApply(selected.size+' → '+v, x=>{ x.category=v; }); return; }
   if(t.id==='bb-client' && t.value){ const v=t.value; bulkApply(selected.size+' → '+v, x=>{ x.client=v; }); return; }
   if(t.id?.startsWith('f-')){
